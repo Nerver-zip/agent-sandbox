@@ -4,6 +4,7 @@ set -euo pipefail
 test -s /etc/ssh/ssh_host_ed25519_key
 test -s /etc/ssh/ssh_host_ed25519_key.pub
 test -f /home/agent/.codex/auth.json
+chown -R agent:agent /home/agent/.codex 2>/dev/null || true
 mkdir -p /run/sshd
 chmod 0755 /run/sshd
 /usr/sbin/sshd -t -f /etc/ssh/sshd_config

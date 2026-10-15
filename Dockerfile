@@ -32,7 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Build-time CLIs are installed into immutable image layers, not into the disposable workspace.
 # CODEX_VERSION can be pinned using --build-arg or via compose.yaml build.args.
 RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
-    && command -v codex && codex --version
+    && command -v codex && codex --version \
+    && chown -R agent:agent /home/agent/.codex
 
 # Remote Oh My Zsh source (track updates explicitly by rebuilding).
 RUN git clone --depth 1 https://github.com/ohmyzsh/ohmyzsh.git /opt/oh-my-zsh \

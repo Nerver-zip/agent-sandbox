@@ -11,7 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash zsh zsh-autosuggestions zsh-syntax-highlighting \
-      openssh-server openssh-client ca-certificates curl wget git gh gnupg \
+      openssh-server openssh-client ca-certificates curl wget git gh gnupg kitty-terminfo \
       neovim tmux eza fastfetch starship jq ripgrep fd-find fzf less htop tree file procps \
       unzip zip tar xz-utils gzip bash-completion \
       python3 python3-venv python3-pip pipx \

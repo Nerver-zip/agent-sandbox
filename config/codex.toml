@@ -1,0 +1,5 @@
+# Persist credentials in CODEX_HOME/auth.json only.
+# Config, history, sessions, caches, and workspace are baked/ephemeral.
+cli_auth_credentials_store = "file"
+[history]
+persistence = "none"

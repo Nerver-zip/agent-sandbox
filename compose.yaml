@@ -1,0 +1,69 @@
+name: agent-sandbox
+services:
+  workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-latest}
+    image: agent-sandbox:local
+    hostname: agent-sandbox
+    init: true
+    restart: "no" # Firewall is installed by scripts/up.sh, not by Docker Compose.
+    environment:
+      HOME: /home/agent
+      CODEX_HOME: /home/agent/.codex
+      STARSHIP_CONFIG: /home/agent/.config/starship/starship.toml
+      TZ: America/Sao_Paulo
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    volumes:
+      # Host identity survives docker compose down; the agent cannot edit it.
+      - ./persistent/ssh/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro
+      - ./persistent/ssh/ssh_host_ed25519_key.pub:/etc/ssh/ssh_host_ed25519_key.pub:ro
+      # Fine-grained GitHub PAT: read-only inside the agent; never Docker environment.
+      - ./persistent/gh/token:/opt/agent-secrets/gh_token:ro
+      # Only Codex auth.json persists. Sessions, logs, cache, config and workspace do not.
+      # Owner UID 10001 on host, file mode 0600. User agent can read/write bearer credentials.
+      - ./persistent/codex/auth.json:/home/agent/.codex/auth.json:rw
+    read_only: false # Agent is allowed to develop and install user-space tools in its own container.
+    privileged: false
+    cap_drop: [ALL]
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - SYS_CHROOT
+      - AUDIT_WRITE
+    security_opt:
+      - no-new-privileges:true
+    cgroup: private
+    pids_limit: 256
+    mem_limit: ${AGENT_MEMORY:-3g}
+    memswap_limit: ${AGENT_MEMORY:-3g}
+    cpus: ${AGENT_CPUS:-2.0}
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=16m
+      - /tmp:rw,nosuid,nodev,size=512m
+    ports:
+      - "${TAILSCALE_IP:?Run scripts/setup.sh first}:${AGENT_SSH_PORT:-2222}:2222/tcp"
+    networks: [sandbox]
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /etc/ssh/ssh_host_ed25519_key && /usr/sbin/sshd -t -f /etc/ssh/sshd_config && pgrep -x sshd >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+networks:
+  sandbox:
+    external: true
+    name: agent_sandbox_net

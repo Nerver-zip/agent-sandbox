@@ -1,0 +1,20 @@
+# Install at /etc/systemd/system/agent-sandbox.service and update WorkingDirectory/ExecStart.
+# Use only if you accept automated startup; firewall rules MUST precede Compose startup.
+[Unit]
+Description=Agent Sandbox (firewall before container)
+Requires=docker.service tailscaled.service
+After=docker.service tailscaled.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/nerver/prod/agent-sandbox
+ExecStart=/home/nerver/prod/agent-sandbox/scripts/up.sh
+ExecStop=/usr/bin/docker compose stop
+TimeoutStartSec=0
+# Useful when Tailscale has not yet assigned its address at initial boot.
+Restart=on-failure
+RestartSec=15s
+
+[Install]
+WantedBy=multi-user.target

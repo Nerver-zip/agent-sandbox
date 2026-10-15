@@ -1,0 +1,14 @@
+.git
+.venv
+.env
+*.zip
+persistent/
+README.md
+docs/
+tests/
+ssh/*
+!ssh/authorized_keys
+scripts/*
+!scripts/container-entrypoint.sh
+!scripts/gh-wrapper.sh
+!scripts/firewall.sh

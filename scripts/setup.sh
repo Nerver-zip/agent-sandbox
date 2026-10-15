@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+umask 077
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+for cmd in docker tailscale ssh-keygen awk; do command -v "$cmd" >/dev/null || fail "Missing command: $cmd"; done
+docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required.'
+
+PUBKEY=${1:-"$HOME/.ssh/id_ed25519.pub"}
+[[ -r "$PUBKEY" ]] || fail "Public key missing: $PUBKEY (pass its path as argument)"
+[[ $(wc -l < "$PUBKEY") -eq 1 ]] || fail 'Use a single SSH public key per file.'
+IFS=' ' read -r KEY_TYPE KEY_DATA KEY_COMMENT < "$PUBKEY" || true
+[[ "$KEY_TYPE" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))$ && "$KEY_DATA" =~ ^[A-Za-z0-9+/=]+$ ]] || fail 'Expected PUBLIC SSH key, never a private key.'
+ssh-keygen -lf "$PUBKEY" >/dev/null 2>&1 || fail 'Invalid SSH public key.'
+TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
+[[ "$TS_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Tailscale host IPv4 not detected.'
+
+install -d -m 0700 persistent persistent/ssh persistent/codex persistent/gh ssh
+HOST_KEY="$PWD/persistent/ssh/ssh_host_ed25519_key"
+HOST_PUB="$HOST_KEY.pub"
+if [[ -f "$HOST_KEY" ]]; then
+  [[ -f "$HOST_PUB" ]] || fail 'SSH host private key exists, but public key is missing.'
+  echo 'Keeping existing SSH server identity.'
+else
+  [[ ! -e "$HOST_PUB" ]] || fail 'Orphaned SSH host public key. Fix manually.'
+  # Migrate from the previous persistent layout when available, preserving known_hosts.
+  if [[ -s ssh/host_keys/ssh_host_ed25519_key && -s ssh/host_keys/ssh_host_ed25519_key.pub ]]; then
+    cp ssh/host_keys/ssh_host_ed25519_key "$HOST_KEY"
+    cp ssh/host_keys/ssh_host_ed25519_key.pub "$HOST_PUB"
+    echo 'Migrated SSH identity from previous ssh/host_keys layout.'
+  else
+  # Migrate the live container's exact host key, avoiding known_hosts warnings.
+  CID=$(docker ps -q --filter 'label=com.docker.compose.project=agent-sandbox' --filter 'label=com.docker.compose.service=workspace' | head -n 1)
+  if [[ -n "$CID" ]]; then
+    TMP_PRIV=$(mktemp "${HOST_KEY}.tmp.XXXXXXXX")
+    TMP_PUB=$(mktemp "${HOST_PUB}.tmp.XXXXXXXX")
+    trap 'rm -f -- "$TMP_PRIV" "$TMP_PUB"' EXIT
+    docker exec "$CID" cat /etc/ssh/ssh_host_ed25519_key > "$TMP_PRIV" || fail 'Could not extract SSH host private key.'
+    docker exec "$CID" cat /etc/ssh/ssh_host_ed25519_key.pub > "$TMP_PUB" || fail 'Could not extract SSH host public key.'
+    chmod 0600 "$TMP_PRIV"
+    ssh-keygen -y -f "$TMP_PRIV" >/dev/null 2>&1 || fail 'Extracted SSH host key is invalid.'
+    mv -f "$TMP_PRIV" "$HOST_KEY"
+    mv -f "$TMP_PUB" "$HOST_PUB"
+    trap - EXIT
+    echo 'Migrated SSH server identity from currently running container.'
+  else
+    ssh-keygen -q -t ed25519 -N '' -f "$HOST_KEY"
+    echo 'Created a new SSH server identity.'
+  fi
+  fi
+fi
+chmod 0600 "$HOST_KEY"
+chmod 0644 "$HOST_PUB"
+EXPECTED=$(awk '{print $1, $2}' "$HOST_PUB")
+DERIVED=$(ssh-keygen -y -f "$HOST_KEY" | awk '{print $1, $2}') || fail 'SSH host private key invalid.'
+[[ "$EXPECTED" == "$DERIVED" ]] || fail 'SSH server private/public keys do not match.'
+ssh-keygen -lf "$HOST_PUB"
+
+# Persist ONLY the Codex auth file from CODEX_HOME; SSH identity and GH PAT are separate allowlisted files.
+# {} is valid unauthenticated state, unlike an empty (invalid JSON) file.
+AUTH_FILE="$PWD/persistent/codex/auth.json"
+if [[ ! -e "$AUTH_FILE" ]]; then
+  printf '{}\n' > "$AUTH_FILE"
+  # Migrate the CURRENT (running) Codex file, if present. No secret is printed.
+  OLD_CID=$(docker ps -q --filter 'label=com.docker.compose.project=agent-sandbox' --filter 'label=com.docker.compose.service=workspace' | head -n 1)
+  if [[ -n "$OLD_CID" ]]; then
+    MIGRATED=$(mktemp)
+    if docker exec "$OLD_CID" cat /home/agent/.codex/auth.json > "$MIGRATED" 2>/dev/null && \
+       [[ -s "$MIGRATED" ]] && python3 -m json.tool "$MIGRATED" >/dev/null 2>&1; then
+      cat "$MIGRATED" > "$AUTH_FILE"
+      echo 'Migrated Codex login from running container.'
+    fi
+    rm -f "$MIGRATED"
+  fi
+fi
+[[ -f "$AUTH_FILE" && ! -L "$AUTH_FILE" ]] || fail 'Codex auth must be a regular file, not a symlink.'
+if [[ -r "$AUTH_FILE" ]]; then
+  python3 -m json.tool "$AUTH_FILE" >/dev/null || fail 'Codex auth file is invalid JSON.'
+else
+  sudo python3 -m json.tool "$AUTH_FILE" >/dev/null || fail 'Codex auth file is invalid JSON.'
+fi
+# Running container user is UID 10001; keep this secret 0600 and inaccessible to others.
+chmod 0600 "$AUTH_FILE" 2>/dev/null || true
+if [[ "$(stat -c '%u' "$AUTH_FILE")" != 10001 ]]; then
+  if [[ $EUID -eq 0 ]]; then chown 10001:10001 "$AUTH_FILE"
+  else
+    command -v sudo >/dev/null || fail 'sudo is required to set ownership of Codex auth file.'
+    sudo chown 10001:10001 "$AUTH_FILE"
+  fi
+fi
+[[ "$(stat -c '%a' "$AUTH_FILE")" == 600 ]] || fail 'Codex auth file must have mode 0600.'
+
+# Optional fine-grained GitHub token. Empty = unauthenticated gh until set-gh-token.sh.
+GH_TOKEN_FILE="$PWD/persistent/gh/token"
+if [[ ! -e "$GH_TOKEN_FILE" ]]; then
+  : > "$GH_TOKEN_FILE"
+fi
+[[ -f "$GH_TOKEN_FILE" && ! -L "$GH_TOKEN_FILE" ]] || fail 'GitHub token must be a regular file, not a symlink.'
+if [[ $(stat -c '%u' "$GH_TOKEN_FILE") != 10001 ]]; then
+  if [[ $EUID -eq 0 ]]; then chown 10001:10001 "$GH_TOKEN_FILE"
+  else sudo chown 10001:10001 "$GH_TOKEN_FILE"; fi
+fi
+if [[ $EUID -eq 0 ]]; then chmod 0400 "$GH_TOKEN_FILE"
+else sudo chmod 0400 "$GH_TOKEN_FILE"; fi
+[[ $(stat -c '%u:%a' "$GH_TOKEN_FILE") == 10001:400 ]] || fail 'GitHub token must be owned by UID 10001, mode 0400.'
+
+install -m 0600 "$PUBKEY" ssh/authorized_keys
+if [[ -f .env ]]; then
+  # Fix IP changes while retaining user-provided memory/CPU/port settings.
+  [[ -L .env ]] && fail '.env must not be a symlink.'
+  python3 - "$TS_IP" <<'PYENV'
+from pathlib import Path
+import sys
+p=Path('.env')
+lines=p.read_text().splitlines()
+lines=[f'TAILSCALE_IP={sys.argv[1]}' if l.startswith('TAILSCALE_IP=') else l for l in lines]
+if not any(l.startswith('TAILSCALE_IP=') for l in lines):lines.insert(0, f'TAILSCALE_IP={sys.argv[1]}')
+p.write_text('\n'.join(lines)+'\n')
+PYENV
+  echo 'Kept .env settings and refreshed Tailscale IP.'
+else
+  cat > .env <<CONF
+TAILSCALE_IP=$TS_IP
+AGENT_SSH_PORT=2222
+AGENT_MEMORY=3g
+AGENT_CPUS=2.0
+CODEX_VERSION=latest
+CONF
+fi
+chmod 0600 .env
+printf '\nSetup complete. Tailscale host IP: %s\n' "$TS_IP"
+echo 'Run ./scripts/up.sh to deploy.'
+echo 'SSH host identity, Codex auth and optional GitHub PAT persist across docker compose down.'

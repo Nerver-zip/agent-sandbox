@@ -1,0 +1,7 @@
+.venv/
+.env
+persistent/
+ssh/authorized_keys
+*.zip
+__pycache__/
+.pytest_cache/

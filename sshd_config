@@ -1,0 +1,33 @@
+Port 2222
+AddressFamily inet
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKeyAlgorithms ssh-ed25519
+PermitRootLogin no
+AllowUsers agent
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+UsePAM no
+StrictModes yes
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PermitUserRC no
+GatewayPorts no
+PermitTTY yes
+ClientAliveInterval 120
+ClientAliveCountMax 3
+MaxAuthTries 3
+MaxSessions 6
+MaxStartups 5:30:10
+LogLevel VERBOSE
+PrintMotd no
+SetEnv LANG=C.UTF-8 LC_ALL=C.UTF-8
+Subsystem sftp internal-sftp

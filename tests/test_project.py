@@ -60,6 +60,7 @@ class ProjectContractTests(unittest.TestCase):
             "docker-cli docker-compose docker-buildx", "DOCKER_HOST=tcp://dind:2375",
             "zsh-autosuggestions", "zsh-syntax-highlighting", "openssh-server",
             "npm install --global", "@openai/codex", "antigravity.google/cli/install.sh",
+            "config/tmux.conf",
             "gh-wrapper.sh", "credential.https://github.com.helper", "useradd --create-home",
         ):
             with self.subTest(v=v):
@@ -74,6 +75,9 @@ class ProjectContractTests(unittest.TestCase):
             self.assertIn(v, z)
         tomllib.loads((ROOT / "config/starship.toml").read_text())
         tomllib.loads((ROOT / "config/codex.toml").read_text())
+        tmux = (ROOT / "config/tmux.conf").read_text()
+        self.assertIn("mouse on", tmux)
+        self.assertIn("history-limit 100000", tmux)
 
     def test_setup_persists_only_explicit_files(self):
         setup = (ROOT / "scripts/setup.sh").read_text()

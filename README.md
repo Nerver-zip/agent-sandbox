@@ -41,7 +41,8 @@ agent-sandbox/
 ├── config/
 │   ├── agent.zshrc                 # Oh My Zsh, syntax highlighting, autosuggestions, eza, fastfetch
 │   ├── starship.toml              # Catppuccin Mocha powerline prompt
-│   └── codex.toml                 # File credential store; no Codex command history
+│   ├── codex.toml                 # File credential store; no Codex command history
+│   └── tmux.conf                  # Mouse support and scrollback history
 ├── scripts/
 │   ├── setup.sh                   # Create/migrate SSH identity, public key and credentials
 │   ├── up.sh                      # Network + firewall preflight, then build and launch

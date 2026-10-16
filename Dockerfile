@@ -54,6 +54,7 @@ COPY --chown=agent:agent --chmod=0600 ssh/authorized_keys /home/agent/.ssh/autho
 COPY --chown=agent:agent --chmod=0644 config/agent.zshrc /home/agent/.zshrc
 COPY --chown=agent:agent --chmod=0644 config/starship.toml /home/agent/.config/starship/starship.toml
 COPY --chown=agent:agent --chmod=0644 config/codex.toml /home/agent/.codex/config.toml
+COPY --chown=agent:agent --chmod=0644 config/tmux.conf /home/agent/.tmux.conf
 COPY --chmod=0644 sshd_config /etc/ssh/sshd_config
 COPY --chmod=0755 scripts/container-entrypoint.sh /usr/local/sbin/agent-entrypoint
 # gh wrapper loads the fine-grained token only for gh processes, not the entire shell.

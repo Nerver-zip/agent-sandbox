@@ -33,7 +33,7 @@ fi
 ACTUAL_BR=$(docker network inspect -f '{{ index .Options "com.docker.network.bridge.name" }}' "$NETWORK")
 ACTUAL_SUBNET=$(docker network inspect -f '{{ (index .IPAM.Config 0).Subnet }}' "$NETWORK")
 [[ "$ACTUAL_BR" == "$BRIDGE" && "$ACTUAL_SUBNET" == "$SUBNET" ]] || fail 'Existing network does not have expected bridge/subnet.'
-EXTRA=$(docker network inspect -f '{{range $id, $c := .Containers}}{{println $c.Name}}{{end}}' "$NETWORK" | grep -v -E '^agent-sandbox-workspace-1$' || true)
+EXTRA=$(docker network inspect -f '{{range $id, $c := .Containers}}{{println $c.Name}}{{end}}' "$NETWORK" | grep -v -E '^agent-sandbox-(workspace|dind)-1$' || true)
 [[ -z "$EXTRA" ]] || fail "Unexpected containers attached to sandbox network: $EXTRA"
 
 # Fail-closed: network firewall must be installed BEFORE Docker container starts.

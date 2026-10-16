@@ -7,11 +7,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     EDITOR=nvim VISUAL=nvim \
     CODEX_HOME=/home/agent/.codex \
-    STARSHIP_CONFIG=/home/agent/.config/starship/starship.toml
+    STARSHIP_CONFIG=/home/agent/.config/starship/starship.toml \
+    DOCKER_HOST=tcp://dind:2375
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash zsh zsh-autosuggestions zsh-syntax-highlighting \
       openssh-server openssh-client ca-certificates curl wget git gh gnupg kitty-terminfo \
+      docker-cli docker-compose docker-buildx \
       neovim tmux eza fastfetch starship jq ripgrep fd-find fzf less htop tree file procps \
       unzip zip tar xz-utils gzip bash-completion \
       python3 python3-venv python3-pip pipx \
@@ -19,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config make cmake \
       dnsutils netcat-openbsd tini \
     && rm -rf /var/lib/apt/lists/* \
-    && echo 'export LANG=C.UTF-8\nexport LC_ALL=C.UTF-8' >> /etc/zsh/zshenv \
+    && echo 'export LANG=C.UTF-8\nexport LC_ALL=C.UTF-8\nexport DOCKER_HOST=tcp://dind:2375' >> /etc/zsh/zshenv \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && useradd --create-home --uid 10001 --shell /usr/bin/zsh agent \
     && passwd -d agent \

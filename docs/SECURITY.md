@@ -2,7 +2,16 @@
 
 ## Goals
 
-The unprivileged `agent` should not receive the host's SSH private key, Docker socket, homelab bind mounts, production files, root login or a privileged container. A dedicated Docker bridge and host iptables `DOCKER-USER`/`INPUT` rules block **new connections** from this bridge to other RFC1918 networks, CGNAT/tailnet (`100.64/10`), loopback, link-local, host services, and other Docker bridges. SSH exposure is restricted to the host's Tailscale IPv4 address. CPU, RAM, and process limits reduce accidental resource exhaustion.
+The unprivileged `agent` workspace should not receive the host's SSH private key, host Docker socket, homelab bind mounts, production files, root login or a privileged container. A dedicated Docker bridge and host iptables `DOCKER-USER`/`INPUT` rules block **new connections** from this bridge to other RFC1918 networks, CGNAT/tailnet (`100.64/10`), loopback, link-local, host services, and other Docker bridges. SSH exposure is restricted to the host's Tailscale IPv4 address. CPU, RAM, and process limits reduce accidental resource exhaustion. Docker capability inside the workspace is provided via an isolated Docker-in-Docker (DinD) sidecar service without sharing or exposing the host Docker daemon.
+
+## Docker-in-Docker (DinD) isolation
+
+To provide Docker capabilities to coding agents without exposing the host's Docker daemon (`/var/run/docker.sock`) or compromising other homelab containers:
+
+1. **No Host Docker Socket Mount**: The workspace container has NO access to `/var/run/docker.sock`. It cannot see, inspect, modify, stop, or exec into any host or homelab containers.
+2. **Dedicated Daemon**: The workspace container communicates with the sidecar daemon over TCP (`DOCKER_HOST=tcp://dind:2375`) on the isolated `agent_sandbox_net` bridge.
+3. **Privilege Boundary**: While the `dind` container runs with required container-in-container capabilities (`privileged: true`), it does not mount any host directories or the host socket. The `workspace` container itself remains strictly unprivileged (`privileged: false`, `cap_drop: [ALL]`, `no-new-privileges: true`, non-root UID 10001).
+4. **Network Firewall Enforcement**: Any containers spawned inside the DinD daemon share the `agent_sandbox_net` bridge egress path. The host iptables rules (`ASBX_EGRESS`) apply equally to DinD egress: inner containers can access the public Internet (e.g. `docker pull`), but are blocked from reaching the host, LAN, tailnet, and other Docker bridges.
 
 ## Explicit exceptions
 

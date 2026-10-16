@@ -15,10 +15,11 @@ Agent Sandbox starts a dedicated Debian SSH server as a hardened Docker Compose 
 | Base | Debian 13 (Trixie); unprivileged `agent` user (UID 10001), `/home/agent/workspace` |
 | Terminal | Zsh, [Oh My Zsh](https://ohmyz.sh/), `git` plugin, autosuggestions, syntax highlighting, custom Starship / Catppuccin Mocha, Fastfetch |
 | Editor & developer tools | Neovim, tmux, eza, fzf, ripgrep, fd, jq, htop, Git, curl, Python, pipx, Node.js/npm, C/C++ toolchain, CMake |
+| Docker environment | Docker CLI, Docker Compose v2, Buildx via isolated Docker-in-Docker sidecar (`dind`); no host socket exposure |
 | Agent harnesses | [Codex CLI](https://github.com/openai/codex) (`codex`) and [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`) preinstalled at **image build time** |
 | GitHub | Official `gh` CLI; optional narrowly scoped fine-grained PAT in a **read-only** file mount; built-in HTTPS Git credential helper |
 | Access | Independent OpenSSH service on the host Tailscale IPv4, port `2222`; SSH **public-key authentication only** |
-| Isolation | Separate Docker bridge, explicit firewall rules, no Docker socket, no personal home or production mounts, no root shell for agent, CPU/RAM/PID limits |
+| Isolation | Separate Docker bridge, explicit firewall rules, isolated DinD sidecar (no host Docker socket), no personal home or production mounts, no root shell for agent, CPU/RAM/PID limits |
 | Persistence | **SSH server host identity**, **Codex `auth.json`**, **GitHub PAT** only; all other agent files are disposable |
 
 A Nerd Font is recommended **on your SSH client terminal** to render the Starship icons. The configuration is based on a Catppuccin Mocha powerline prompt. It intentionally omits local-only paths, Android SDK variables, secret-tool commands, and the Oh My Zsh `sudo` plugin.
@@ -212,6 +213,15 @@ A Git system-level HTTPS credential helper invokes `gh auth git-credential`, so 
 ### Antigravity CLI (`agy`)
 
 AGY is installed during the image build using Google's official Linux installer, into the image's `/home/agent/.local/bin/agy`. Launch it with `agy`. Authentication on SSH typically provides a URL to open on your own device; complete the Google sign-in there and return to the terminal. **The AGY session is disposable**: this project does not mount its keyring or account cache. Expect to authenticate again after `docker compose down`. Future versions could offer a narrower, documented file/token storage mechanism.
+
+### Docker and Docker Compose (Isolated DinD)
+
+The workspace container includes `docker`, `docker compose`, and `docker buildx`. Rather than mounting the host's `/var/run/docker.sock` (which would allow an agent to inspect, control, or compromise other homelab containers on the host), Agent Sandbox connects to an isolated **Docker-in-Docker sidecar** (`dind:2375`) on the private sandbox bridge.
+
+- The agent has full Docker capabilities inside its sandbox (e.g. `docker run`, `docker compose up`, building and testing containerized apps).
+- The agent **cannot** see, inspect, stop, or tamper with any homelab or host containers.
+- Outbound traffic from DinD and its containers inherits the host iptables firewall: public registry pulls and Internet connections work, while access to host services, LAN, tailnet, and other Docker bridges is blocked.
+- Configurable resource limits in `.env` (`DIND_MEMORY`, `DIND_CPUS`).
 
 ## Update or migrate a previous Agent Sandbox
 

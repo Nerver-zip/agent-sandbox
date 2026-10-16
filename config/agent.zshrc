@@ -8,6 +8,7 @@ export PATH="$HOME/.local/bin:$HOME/.local/bin/scripts:$HOME/.npm-global/bin:/us
 export EDITOR=nvim VISUAL=nvim
 export CODEX_HOME="$HOME/.codex"
 export STARSHIP_CONFIG="$HOME/.config/starship/starship.toml"
+export DOCKER_HOST="${DOCKER_HOST:-tcp://dind:2375}"
 export ZSH=/opt/oh-my-zsh
 ZSH_THEME=""   # Starship provides the prompt.
 zstyle ':omz:update' mode disabled

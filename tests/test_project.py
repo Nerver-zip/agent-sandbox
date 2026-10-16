@@ -40,11 +40,24 @@ class ProjectContractTests(unittest.TestCase):
         self.assertTrue(self.s["ports"][0].startswith("${TAILSCALE_IP:"))
         self.assertNotIn("GH_TOKEN", self.s["environment"])
         self.assertFalse(any("100.118.53.107" in str(x) for x in self.s["environment"].values()))
+        self.assertEqual(self.s["environment"]["DOCKER_HOST"], "tcp://dind:2375")
+        self.assertIn("dind", self.s["depends_on"])
+
+    def test_dind_service_and_isolation(self):
+        self.assertIn("dind", self.c["services"])
+        dind = self.c["services"]["dind"]
+        self.assertTrue(dind["privileged"])
+        self.assertEqual(dind.get("networks"), ["sandbox"])
+        self.assertNotIn("/var/run/docker.sock", str(dind))
+        self.assertNotIn("ports", dind)
+        self.assertEqual(dind.get("restart"), "no")
+        self.assertIn("docker:27-dind", dind.get("image", ""))
 
     def test_image_contains_expected_tools(self):
         d = (ROOT / "Dockerfile").read_text()
         for v in (
             "debian:trixie-slim", "gh gnupg", "starship", "fastfetch", "eza",
+            "docker-cli docker-compose docker-buildx", "DOCKER_HOST=tcp://dind:2375",
             "zsh-autosuggestions", "zsh-syntax-highlighting", "openssh-server",
             "npm install --global", "@openai/codex", "antigravity.google/cli/install.sh",
             "gh-wrapper.sh", "credential.https://github.com.helper", "useradd --create-home",
@@ -57,7 +70,7 @@ class ProjectContractTests(unittest.TestCase):
 
     def test_shell_defaults(self):
         z = (ROOT / "config/agent.zshrc").read_text()
-        for v in ("oh-my-zsh.sh", "starship init zsh", "fastfetch", "eza --icons", "zsh-autosuggestions"):
+        for v in ("oh-my-zsh.sh", "starship init zsh", "fastfetch", "eza --icons", "zsh-autosuggestions", "DOCKER_HOST"):
             self.assertIn(v, z)
         tomllib.loads((ROOT / "config/starship.toml").read_text())
         tomllib.loads((ROOT / "config/codex.toml").read_text())

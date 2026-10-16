@@ -26,10 +26,18 @@ docker compose exec -T --user agent workspace bash -c \
   || fail 'Agent cannot access secrets with expected permissions.'
 pass 'Agent cannot read SSH server private key or write GitHub PAT'
 
-for bin in zsh nvim tmux starship fastfetch eza codex agy gh; do
+for bin in zsh nvim tmux starship fastfetch eza codex agy gh docker; do
   docker compose exec -T --user agent workspace bash -c "PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin command -v '$bin' >/dev/null" || fail "$bin is missing"
 done
-pass 'Zsh, Neovim, tmux, Starship, Fastfetch, Eza, Codex, AGY and GitHub CLI installed'
+pass 'Zsh, Neovim, tmux, Starship, Fastfetch, Eza, Codex, AGY, GitHub CLI and Docker installed'
+
+DIND_CID=$(docker compose ps -q dind)
+[[ -n "$DIND_CID" ]] || fail 'DinD container not found.'
+[[ "$(docker inspect -f '{{.State.Running}}' "$DIND_CID")" == true ]] || fail 'DinD container not running.'
+BINDS=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' "$DIND_CID" | grep -v '^$' || true)
+[[ -z "$BINDS" ]] || fail "DinD must not mount host paths: $BINDS"
+docker compose exec -T --user agent workspace docker info >/dev/null 2>&1 || fail 'Agent cannot connect to isolated Docker daemon.'
+pass 'Isolated Docker daemon reachable and operational from workspace'
 docker compose exec -T --user agent workspace bash -lc 'test "$(id -u)" -eq 10001 && test -w "$HOME/workspace"' || fail 'Agent user cannot write own workspace.'
 [[ $(docker compose exec -T --user agent workspace getent passwd agent | tr -d '\r' | cut -d: -f7) == /usr/bin/zsh ]] || fail 'Zsh is not default shell'
 pass 'Agent UID 10001 and Zsh default shell'

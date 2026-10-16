@@ -10,10 +10,14 @@ services:
     hostname: agent-sandbox
     init: true
     restart: "no" # Firewall is installed by scripts/up.sh, not by Docker Compose.
+    depends_on:
+      dind:
+        condition: service_healthy
     environment:
       HOME: /home/agent
       CODEX_HOME: /home/agent/.codex
       STARSHIP_CONFIG: /home/agent/.config/starship/starship.toml
+      DOCKER_HOST: tcp://dind:2375
       TZ: America/Sao_Paulo
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
@@ -59,6 +63,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  dind:
+    image: docker:27-dind
+    hostname: dind
+    restart: "no"
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command:
+      - --tls=false
+      - --host=tcp://0.0.0.0:2375
+      - --storage-driver=overlay2
+    networks: [sandbox]
+    mem_limit: ${DIND_MEMORY:-4g}
+    cpus: ${DIND_CPUS:-2.0}
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     stop_grace_period: 30s
     logging:
       driver: json-file

@@ -39,7 +39,8 @@ DIND_CID=$(docker compose ps -q dind)
 BINDS=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' "$DIND_CID" | grep -v '^$' || true)
 [[ -z "$BINDS" ]] || fail "DinD must not mount host paths: $BINDS"
 docker compose exec -T --user agent workspace docker info >/dev/null 2>&1 || fail 'Agent cannot connect to isolated Docker daemon.'
-pass 'Isolated Docker daemon reachable and operational from workspace'
+docker compose exec -T --user agent workspace env -u DOCKER_HOST docker info >/dev/null 2>&1 || fail 'Agent cannot connect via /var/run/docker.sock proxy.'
+pass 'Isolated Docker daemon reachable via DOCKER_HOST and /var/run/docker.sock'
 docker compose exec -T --user agent workspace bash -lc 'test "$(id -u)" -eq 10001 && test -w "$HOME/workspace"' || fail 'Agent user cannot write own workspace.'
 [[ $(docker compose exec -T --user agent workspace getent passwd agent | tr -d '\r' | cut -d: -f7) == /usr/bin/zsh ]] || fail 'Zsh is not default shell'
 pass 'Agent UID 10001 and Zsh default shell'

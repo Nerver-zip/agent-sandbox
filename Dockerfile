@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash zsh zsh-autosuggestions zsh-syntax-highlighting \
       openssh-server openssh-client ca-certificates curl wget git gh gnupg kitty-terminfo \
-      docker-cli docker-compose docker-buildx \
+      docker-cli docker-compose docker-buildx socat \
       neovim tmux eza fastfetch starship jq ripgrep fd-find fzf less htop tree file procps \
       unzip zip tar xz-utils gzip bash-completion \
       python3 python3-venv python3-pip pipx \
@@ -23,7 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && echo 'export LANG=C.UTF-8\nexport LC_ALL=C.UTF-8\nexport DOCKER_HOST=tcp://dind:2375' >> /etc/zsh/zshenv \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
-    && useradd --create-home --uid 10001 --shell /usr/bin/zsh agent \
+    && groupadd -r docker \
+    && useradd --create-home --uid 10001 --shell /usr/bin/zsh -G docker agent \
     && passwd -d agent \
     && install -d -m 0700 -o agent -g agent /home/agent/.ssh /home/agent/.codex \
     && install -d -m 0755 /run/sshd \

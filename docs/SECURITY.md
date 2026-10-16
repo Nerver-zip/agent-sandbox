@@ -12,6 +12,7 @@ To provide Docker capabilities to coding agents without exposing the host's Dock
 2. **Dedicated Daemon**: The workspace container communicates with the sidecar daemon over TCP (`DOCKER_HOST=tcp://dind:2375`) on the isolated `agent_sandbox_net` bridge.
 3. **Privilege Boundary**: While the `dind` container runs with required container-in-container capabilities (`privileged: true`), it does not mount any host directories or the host socket. The `workspace` container itself remains strictly unprivileged (`privileged: false`, `cap_drop: [ALL]`, `no-new-privileges: true`, non-root UID 10001).
 4. **Network Firewall Enforcement**: Any containers spawned inside the DinD daemon share the `agent_sandbox_net` bridge egress path. The host iptables rules (`ASBX_EGRESS`) apply equally to DinD egress: inner containers can access the public Internet (e.g. `docker pull`), but are blocked from reaching the host, LAN, tailnet, and other Docker bridges.
+5. **Local Socket Proxy**: For compatibility with tools, test runners, and agent harnesses that query `unix:///var/run/docker.sock` directly, the workspace container runs an internal `socat` bridge forwarding `/var/run/docker.sock` to `tcp://dind:2375`. This socket is created inside the container and does not mount or expose the host's Docker daemon.
 
 ## Explicit exceptions
 

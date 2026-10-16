@@ -7,5 +7,7 @@ test -f /home/agent/.codex/auth.json
 chown -R agent:agent /home/agent/.codex 2>/dev/null || true
 mkdir -p /run/sshd
 chmod 0755 /run/sshd
+rm -f /var/run/docker.sock
+socat UNIX-LISTEN:/var/run/docker.sock,fork,mode=666,reuseaddr TCP:dind:2375 &
 /usr/sbin/sshd -t -f /etc/ssh/sshd_config
 exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config

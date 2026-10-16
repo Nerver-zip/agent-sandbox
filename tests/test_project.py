@@ -57,7 +57,7 @@ class ProjectContractTests(unittest.TestCase):
         d = (ROOT / "Dockerfile").read_text()
         for v in (
             "debian:trixie-slim", "gh gnupg", "starship", "fastfetch", "eza",
-            "docker-cli docker-compose docker-buildx", "DOCKER_HOST=tcp://dind:2375",
+            "docker-cli docker-compose docker-buildx socat", "DOCKER_HOST=tcp://dind:2375",
             "zsh-autosuggestions", "zsh-syntax-highlighting", "openssh-server",
             "npm install --global", "@openai/codex", "antigravity.google/cli/install.sh",
             "config/tmux.conf",
@@ -113,6 +113,11 @@ class ProjectContractTests(unittest.TestCase):
         di = (ROOT / '.dockerignore').read_text()
         self.assertIn('!scripts/container-entrypoint.sh', di)
         self.assertIn('!scripts/gh-wrapper.sh', di)
+
+    def test_entrypoint_docker_sock_proxy(self):
+        entrypoint = (ROOT / "scripts/container-entrypoint.sh").read_text()
+        self.assertIn("socat UNIX-LISTEN:/var/run/docker.sock", entrypoint)
+        self.assertIn("TCP:dind:2375", entrypoint)
 
 if __name__ == "__main__":
     unittest.main()

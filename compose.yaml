@@ -25,6 +25,9 @@ services:
       # Host identity survives docker compose down; the agent cannot edit it.
       - ./persistent/ssh/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro
       - ./persistent/ssh/ssh_host_ed25519_key.pub:/etc/ssh/ssh_host_ed25519_key.pub:ro
+      # Authorized client public keys and outgoing known_hosts survive container recreation.
+      - ./persistent/ssh/authorized_keys:/home/agent/.ssh/authorized_keys:rw
+      - ./persistent/ssh/known_hosts:/home/agent/.ssh/known_hosts:rw
       # Fine-grained GitHub PAT: read-only inside the agent; never Docker environment.
       - ./persistent/gh/token:/opt/agent-secrets/gh_token:ro
       # Only Codex auth.json persists. Sessions, logs, cache, config and workspace do not.

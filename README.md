@@ -60,9 +60,11 @@ agent-sandbox/
 │   ├── SECURITY.md
 │   └── agent-sandbox.service.example
 ├── tests/test_project.py
-├── ssh/authorized_keys            # Generated: client PUBLIC key
+├── ssh/authorized_keys            # Generated: client PUBLIC keys
 ├── persistent/                   # Generated and gitignored; never in Docker image
 │   ├── ssh/ssh_host_ed25519_key[.pub]  # Persistent server identity
+│   ├── ssh/authorized_keys              # Persistent client public keys (PC, laptop, phones)
+│   ├── ssh/known_hosts                  # Persistent outgoing SSH host verifications
 │   ├── codex/auth.json                  # Persistent Codex sign-in
 │   └── gh/token                         # Optional fine-grained PAT
 └── .env                          # Generated: non-secret local deployment settings

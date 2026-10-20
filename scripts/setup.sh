@@ -6,12 +6,9 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 for cmd in docker tailscale ssh-keygen awk; do command -v "$cmd" >/dev/null || fail "Missing command: $cmd"; done
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required.'
 
-PUBKEY=${1:-"$HOME/.ssh/id_ed25519.pub"}
-[[ -r "$PUBKEY" ]] || fail "Public key missing: $PUBKEY (pass its path as argument)"
-[[ $(wc -l < "$PUBKEY") -eq 1 ]] || fail 'Use a single SSH public key per file.'
-IFS=' ' read -r KEY_TYPE KEY_DATA KEY_COMMENT < "$PUBKEY" || true
-[[ "$KEY_TYPE" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))$ && "$KEY_DATA" =~ ^[A-Za-z0-9+/=]+$ ]] || fail 'Expected PUBLIC SSH key, never a private key.'
-ssh-keygen -lf "$PUBKEY" >/dev/null 2>&1 || fail 'Invalid SSH public key.'
+if [[ -n "${1:-}" ]]; then
+  [[ -r "$1" ]] || fail "Public key missing: $1 (pass its path as argument)"
+fi
 TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
 [[ "$TS_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Tailscale host IPv4 not detected.'
 
@@ -104,7 +101,93 @@ if [[ $EUID -eq 0 ]]; then chmod 0400 "$GH_TOKEN_FILE"
 else sudo chmod 0400 "$GH_TOKEN_FILE"; fi
 [[ $(stat -c '%u:%a' "$GH_TOKEN_FILE") == 10001:400 ]] || fail 'GitHub token must be owned by UID 10001, mode 0400.'
 
-install -m 0600 "$PUBKEY" ssh/authorized_keys
+# Persist authorized client public keys across container recreations.
+# Supports single-key .pub files and multi-key authorized_keys files (e.g. PC, laptop, phones).
+AUTH_KEYS_FILE="$PWD/persistent/ssh/authorized_keys"
+TMP_RAW_KEYS=$(mktemp)
+TMP_DEDUP_KEYS=$(mktemp)
+trap 'rm -f -- "$TMP_RAW_KEYS" "$TMP_DEDUP_KEYS"' EXIT
+
+collect_keys_from_stream() {
+  local label=$1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    IFS=' ' read -r KEY_TYPE KEY_DATA KEY_COMMENT <<< "$line"
+    [[ "$KEY_TYPE" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))$ && "$KEY_DATA" =~ ^[A-Za-z0-9+/=]+$ ]] \
+      || fail "Expected PUBLIC SSH key in $label, never a private key."
+    printf '%s\n' "$line" >> "$TMP_RAW_KEYS"
+  done
+}
+
+if [[ -e "$AUTH_KEYS_FILE" ]]; then
+  [[ -f "$AUTH_KEYS_FILE" && ! -L "$AUTH_KEYS_FILE" ]] || fail 'Persistent authorized_keys must be a regular file, not a symlink.'
+  if [[ -r "$AUTH_KEYS_FILE" ]]; then
+    collect_keys_from_stream "$AUTH_KEYS_FILE" < "$AUTH_KEYS_FILE"
+  else
+    collect_keys_from_stream "$AUTH_KEYS_FILE" < <(sudo cat "$AUTH_KEYS_FILE")
+  fi
+fi
+if [[ -f ssh/authorized_keys && -r ssh/authorized_keys ]]; then
+  collect_keys_from_stream "ssh/authorized_keys" < ssh/authorized_keys
+fi
+OLD_CID=$(docker ps -q --filter 'label=com.docker.compose.project=agent-sandbox' --filter 'label=com.docker.compose.service=workspace' | head -n 1)
+if [[ -n "${OLD_CID:-}" ]]; then
+  MIGRATED_AK=$(mktemp)
+  if docker exec "$OLD_CID" cat /home/agent/.ssh/authorized_keys > "$MIGRATED_AK" 2>/dev/null && [[ -s "$MIGRATED_AK" ]]; then
+    collect_keys_from_stream "running container" < "$MIGRATED_AK"
+  fi
+  rm -f "$MIGRATED_AK"
+fi
+if [[ -n "${1:-}" ]]; then
+  collect_keys_from_stream "$1" < "$1"
+else
+  [[ -r "$HOME/.ssh/id_ed25519.pub" ]] && collect_keys_from_stream "$HOME/.ssh/id_ed25519.pub" < "$HOME/.ssh/id_ed25519.pub"
+  [[ -r "$HOME/.ssh/authorized_keys" ]] && collect_keys_from_stream "$HOME/.ssh/authorized_keys" < "$HOME/.ssh/authorized_keys"
+fi
+
+awk '!seen[$1" "$2]++' "$TMP_RAW_KEYS" > "$TMP_DEDUP_KEYS"
+[[ -s "$TMP_DEDUP_KEYS" ]] || fail 'No valid SSH public keys found. Pass a public key or authorized_keys file.'
+ssh-keygen -lf "$TMP_DEDUP_KEYS" >/dev/null 2>&1 || fail 'Invalid SSH public key.'
+install -m 0600 "$TMP_DEDUP_KEYS" ssh/authorized_keys
+if [[ ! -e "$AUTH_KEYS_FILE" ]]; then
+  : > "$AUTH_KEYS_FILE"
+fi
+if [[ $EUID -eq 0 ]]; then
+  cat "$TMP_DEDUP_KEYS" > "$AUTH_KEYS_FILE"
+  chown 10001:10001 "$AUTH_KEYS_FILE"
+  chmod 0600 "$AUTH_KEYS_FILE"
+else
+  command -v sudo >/dev/null || fail 'sudo is required to set ownership of persistent authorized_keys.'
+  sudo sh -c 'cat "$1" > "$2" && chown 10001:10001 "$2" && chmod 0600 "$2"' _ "$TMP_DEDUP_KEYS" "$AUTH_KEYS_FILE"
+fi
+[[ $(stat -c '%u:%a' "$AUTH_KEYS_FILE") == 10001:600 ]] || fail 'Persistent authorized_keys must be owned by UID 10001, mode 0600.'
+rm -f -- "$TMP_RAW_KEYS" "$TMP_DEDUP_KEYS"
+trap - EXIT
+
+# Persist outgoing SSH host key verifications (known_hosts) across container recreations.
+KNOWN_HOSTS_FILE="$PWD/persistent/ssh/known_hosts"
+if [[ ! -e "$KNOWN_HOSTS_FILE" ]]; then
+  : > "$KNOWN_HOSTS_FILE"
+  if [[ -n "${OLD_CID:-}" ]]; then
+    MIGRATED_KH=$(mktemp)
+    if docker exec "$OLD_CID" cat /home/agent/.ssh/known_hosts > "$MIGRATED_KH" 2>/dev/null && [[ -s "$MIGRATED_KH" ]]; then
+      cat "$MIGRATED_KH" > "$KNOWN_HOSTS_FILE"
+      echo 'Migrated SSH known_hosts from running container.'
+    fi
+    rm -f "$MIGRATED_KH"
+  fi
+fi
+[[ -f "$KNOWN_HOSTS_FILE" && ! -L "$KNOWN_HOSTS_FILE" ]] || fail 'SSH known_hosts must be a regular file, not a symlink.'
+if [[ $(stat -c '%u' "$KNOWN_HOSTS_FILE") != 10001 ]]; then
+  if [[ $EUID -eq 0 ]]; then chown 10001:10001 "$KNOWN_HOSTS_FILE"
+  else
+    command -v sudo >/dev/null || fail 'sudo is required to set ownership of SSH known_hosts.'
+    sudo chown 10001:10001 "$KNOWN_HOSTS_FILE"
+  fi
+fi
+if [[ $EUID -eq 0 ]]; then chmod 0600 "$KNOWN_HOSTS_FILE"
+else sudo chmod 0600 "$KNOWN_HOSTS_FILE"; fi
+[[ $(stat -c '%u:%a' "$KNOWN_HOSTS_FILE") == 10001:600 ]] || fail 'SSH known_hosts file must be owned by UID 10001, mode 0600.'
 if [[ -f .env ]]; then
   # Fix IP changes while retaining user-provided memory/CPU/port settings.
   [[ -L .env ]] && fail '.env must not be a symlink.'

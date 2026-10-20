@@ -21,13 +21,13 @@ To provide Docker capabilities to coding agents without exposing the host's Dock
 3. `persistent/gh/token` is a fine-grained PAT mounted read-only, owned by UID 10001. The agent can read and exfiltrate it, even if the wrapper keeps it out of the global login shell environment. Github PAT scopes and expiration must be tightly restricted. The official CLI (`/usr/bin/gh`) is not a safety boundary: agents can run it, the wrapper, or directly read the token file.
 4. Public HTTPS egress is allowed so agents can download packages, clone public Git repos and contact external AI APIs. That also allows data exfiltration and public-network scanning. The firewall is not a general domain allowlist, proxy or content filter.
 5. The embedded Docker DNS resolver may provide DNS responses. Docker's DNS proxy can have configuration-dependent behavior; do not regard DNS isolation as preventing every form of internal name or metadata discovery.
-6. `authorized_keys` (a *public* key) is copied into the Docker image. It does not contain a private key.
+6. `persistent/ssh/authorized_keys` (client *public* keys) and `persistent/ssh/known_hosts` are mounted read-write as user UID 10001 so authorized devices (desktop, laptop, phones) and outgoing SSH host verifications survive container recreation. They do not contain private keys.
 
 ## Limits and known risks
 
 - Docker shares the host's Linux kernel; a container escape vulnerability could break isolation. For genuinely untrusted code, use a VM/microVM with separate Tailscale identity and egress controls, ideally on a separate host or VLAN.
 - Root inside a Docker container is not equivalent to root on the host, but the SSHD process must start as root and retain a few capabilities; it then drops to the unprivileged `agent` account on login.
-- There are exactly four allowlisted bind-mounted files (SSH keypair, Codex auth, GitHub token). Do not add more just for convenience without reviewing the trust boundary.
+- There are exactly six allowlisted bind-mounted files (SSH server keypair, SSH authorized_keys, SSH known_hosts, Codex auth, GitHub token). Do not add more just for convenience without reviewing the trust boundary.
 - The firewall assumes Docker iptables mode with `DOCKER-USER`. It does **not** support native Docker nftables mode, rootless Docker or remote contexts. It is stateful host networking logic, so always start via `scripts/up.sh`. Host firewall rules are not automatically re-applied after every independent Docker daemon/firewall reload. Deploy the supplied systemd example or equivalent boot ordering before treating unattended restarts as safe.
 - Direct `docker compose up` bypasses preflight; access to the host Docker Engine is an administrative privilege. Do not delegate deployment privileges or project config editing to the agent.
 - The host's Tailscale identity is shared by all host-exposed services. Tailnet ACLs apply to reaching that *host*; there is no separate device identity/ACL for the container.

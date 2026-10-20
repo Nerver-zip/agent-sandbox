@@ -23,11 +23,11 @@ fi
 docker image rm agent-sandbox:local >/dev/null 2>&1 || echo 'Note: image still in use or already absent.'
 # Remove only generated state in this project, not parent directories.
 rm -f -- persistent/ssh/ssh_host_ed25519_key persistent/ssh/ssh_host_ed25519_key.pub
-# Token files are owned by container UID 10001, so host operator may need sudo.
+# Token and user SSH files are owned by container UID 10001, so host operator may need sudo.
 if [[ $EUID -eq 0 ]]; then
-  rm -f -- persistent/codex/auth.json persistent/gh/token
+  rm -f -- persistent/codex/auth.json persistent/gh/token persistent/ssh/authorized_keys persistent/ssh/known_hosts
 else
-  sudo rm -f -- persistent/codex/auth.json persistent/gh/token
+  sudo rm -f -- persistent/codex/auth.json persistent/gh/token persistent/ssh/authorized_keys persistent/ssh/known_hosts
 fi
 rm -f -- ssh/authorized_keys .env
 # Also clean up SSH host keypair from older releases.

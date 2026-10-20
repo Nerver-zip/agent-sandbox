@@ -29,11 +29,13 @@ class ProjectContractTests(unittest.TestCase):
             {
                 "./persistent/ssh/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro",
                 "./persistent/ssh/ssh_host_ed25519_key.pub:/etc/ssh/ssh_host_ed25519_key.pub:ro",
+                "./persistent/ssh/authorized_keys:/home/agent/.ssh/authorized_keys:rw",
+                "./persistent/ssh/known_hosts:/home/agent/.ssh/known_hosts:rw",
                 "./persistent/codex/auth.json:/home/agent/.codex/auth.json:rw",
                 "./persistent/gh/token:/opt/agent-secrets/gh_token:ro",
             },
         )
-        self.assertEqual(len(self.s["volumes"]), 4)
+        self.assertEqual(len(self.s["volumes"]), 6)
 
     def test_network(self):
         self.assertTrue(self.c["networks"]["sandbox"]["external"])
@@ -81,7 +83,12 @@ class ProjectContractTests(unittest.TestCase):
 
     def test_setup_persists_only_explicit_files(self):
         setup = (ROOT / "scripts/setup.sh").read_text()
-        for v in ("ssh-keygen -y", "ssh/host_keys/", "/etc/ssh/ssh_host_ed25519_key", "persistent/codex/auth.json", "persistent/gh/token", "chown 10001:10001", "chmod 0400"):
+        for v in (
+            "ssh-keygen -y", "ssh/host_keys/", "/etc/ssh/ssh_host_ed25519_key",
+            "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
+            "persistent/codex/auth.json", "persistent/gh/token",
+            "chown 10001:10001", "chmod 0400",
+        ):
             self.assertIn(v, setup)
         gh = (ROOT / "scripts/gh-wrapper.sh").read_text()
         self.assertIn("export GH_TOKEN", gh)
@@ -95,6 +102,7 @@ class ProjectContractTests(unittest.TestCase):
         for v in (
             "docker compose down --remove-orphans --volumes",
             "firewall.sh remove", "persistent/ssh/ssh_host_ed25519_key",
+            "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
             "persistent/codex/auth.json", "persistent/gh/token", "ssh/authorized_keys .env",
         ):
             self.assertIn(v, d)

@@ -1,115 +1,116 @@
 # Agent Sandbox
 
-> **A disposable, Tailscale-accessible development container for autonomous coding agents.**
->
-> Keep the homelab and other Docker stacks out of the agent's workspace. Keep only deliberate login state across resets.
+A disposable development container for autonomous coding agents, accessible over Tailscale. It isolates coding workloads from other host containers and preserves only configured credentials and SSH keys across container recreations.
 
-Agent Sandbox starts a dedicated Debian SSH server as a hardened Docker Compose workload. It uses the **existing Tailscale installation on the Docker host**, so no extra tailnet node, login approval, or Tailscale state is created in the container. You can still SSH to your host normally on port `22`; connect to the sandbox as `agent` on port `2222`.
+The sandbox runs OpenSSH inside a hardened Debian container via Docker Compose. It listens on the Docker host's existing Tailscale IP, avoiding separate node registration, approvals, or guest Tailscale processes. You connect to the host on port 22 and to the sandbox as `agent` on port 2222.
 
-**This is not a VM or a security boundary against a kernel escape.** A process running as `agent` can inspect any credentials made available to that account and send data to public Internet services. Review [the security model](docs/SECURITY.md) before allowing untrusted autonomous work.
+This setup does not provide virtual machine isolation or protect against kernel vulnerabilities. Code running as `agent` can read all credentials mounted into the account and access the public internet. See [docs/SECURITY.md](docs/SECURITY.md) for details on the security model and trust boundaries.
 
-## What is included?
+## Included components
 
-| Category | Included by default |
+| Category | Components |
 |---|---|
-| Base | Debian 13 (Trixie); unprivileged `agent` user (UID 10001), `/home/agent/workspace` |
-| Terminal | Zsh, [Oh My Zsh](https://ohmyz.sh/), `git` plugin, autosuggestions, syntax highlighting, custom Starship / Catppuccin Mocha, Fastfetch |
-| Editor & developer tools | Neovim, tmux, eza, fzf, ripgrep, fd, jq, htop, Git, curl, Python, pipx, Node.js/npm, C/C++ toolchain, CMake |
-| Docker environment | Docker CLI, Docker Compose v2, Buildx via isolated Docker-in-Docker sidecar (`dind`); no host socket exposure |
-| Agent harnesses | [Codex CLI](https://github.com/openai/codex) (`codex`) and [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`) preinstalled at **image build time** |
-| GitHub | Official `gh` CLI; optional narrowly scoped fine-grained PAT in a **read-only** file mount; built-in HTTPS Git credential helper |
-| Access | Independent OpenSSH service on the host Tailscale IPv4, port `2222`; SSH **public-key authentication only** |
-| Isolation | Separate Docker bridge, explicit firewall rules, isolated DinD sidecar (no host Docker socket), no personal home or production mounts, no root shell for agent, CPU/RAM/PID limits |
-| Persistence | **SSH server host identity**, **Codex `auth.json`**, **GitHub PAT** only; all other agent files are disposable |
+| Base system | Debian 13 (Trixie), unprivileged `agent` user (UID 10001), `/home/agent/workspace` |
+| Shell and terminal | Zsh, [Oh My Zsh](https://ohmyz.sh/), `git` plugin, autosuggestions, syntax highlighting, Starship prompt, Fastfetch |
+| Development tools | Neovim, tmux, eza, fzf, ripgrep, fd, jq, htop, Git, curl, Python, pipx, Node.js/npm, C/C++ toolchain, CMake |
+| Docker runtime | Docker CLI, Compose v2, and Buildx connected to an isolated Docker-in-Docker (`dind`) sidecar |
+| Agent CLIs | [Codex CLI](https://github.com/openai/codex) (`codex`) and [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`) built into the image |
+| GitHub integration | GitHub CLI (`gh`), optional fine-grained PAT mounted read-only, and HTTPS Git credential helper |
+| Network access | OpenSSH service listening on the host Tailscale address at port 2222 with public-key authentication |
+| Isolation controls | Dedicated Docker bridge, host firewall rules, unprivileged user, and resource limits (CPU, memory, PIDs) |
+| Persistent state | Server host key, client `authorized_keys`, `known_hosts`, Codex `auth.json`, and GitHub PAT |
 
-A Nerd Font is recommended **on your SSH client terminal** to render the Starship icons. The configuration is based on a Catppuccin Mocha powerline prompt. It intentionally omits local-only paths, Android SDK variables, secret-tool commands, and the Oh My Zsh `sudo` plugin.
+Install a Nerd Font on your terminal emulator to display the Starship prompt symbols correctly.
 
-### Use cases
+### Common tasks
 
-- SSH into a disposable `tmux`/Neovim shell from a laptop or phone over Tailscale.
-- Clone a repository, ask Codex or AGY to work on it, review changes, push a branch, and create a draft PR with `gh`.
-- Test coding agents and their CLI integrations without installing them on the homelab host.
-- Reset all clones, caches, third-party tools, and generated artifacts while keeping SSH trust and permitted login credentials.
+- SSH into a fresh terminal session from a laptop, desktop, or mobile device over Tailscale.
+- Clone a repository, run Codex or AGY, review generated changes, and push pull requests with `gh`.
+- Test agent frameworks without installing their runtimes and dependencies directly on the host machine.
+- Discard temporary repositories, builds, and caches after completing a task while preserving login sessions.
 
 ## Repository layout
 
 ```text
 agent-sandbox/
-├── Dockerfile                     # Repeatable base image + bundled agent CLIs
-├── compose.yaml                   # Container hardening, limits and four allowlisted mounts
-├── sshd_config                    # SSH key auth and session restrictions
+├── Dockerfile                     # Base image build with preinstalled tools
+├── compose.yaml                   # Hardened Compose configuration and allowlisted mounts
+├── sshd_config                    # SSH daemon restrictions and authentication settings
 ├── config/
-│   ├── agent.zshrc                 # Oh My Zsh, syntax highlighting, autosuggestions, eza, fastfetch
-│   ├── starship.toml              # Catppuccin Mocha powerline prompt
-│   ├── codex.toml                 # File credential store; no Codex command history
-│   └── tmux.conf                  # Mouse support and scrollback history
+│   ├── agent.zshrc                # Shell configuration and alias definitions
+│   ├── starship.toml              # Prompt layout and theme
+│   ├── codex.toml                 # Codex CLI file credential storage settings
+│   └── tmux.conf                  # Scrollback buffer and mouse configuration
 ├── scripts/
-│   ├── setup.sh                   # Create/migrate SSH identity, public key and credentials
-│   ├── up.sh                      # Network + firewall preflight, then build and launch
-│   ├── destroy.sh                 # Explicit full reset (including all persisted credentials)
-│   ├── firewall.sh                # Docker bridge egress and ingress isolation
-│   ├── verify.sh                  # Post-install checks
-│   ├── gh-wrapper.sh              # Supply GH_TOKEN only to gh, not to login shell
-│   ├── set-gh-token.sh            # Hidden prompt: install fine-grained PAT
-│   ├── reset-gh-token.sh          # Clear the local GitHub PAT
-│   ├── import-codex-auth.sh       # Optional existing Codex auth import
-│   ├── reset-codex-auth.sh        # Clear local Codex auth
-│   ├── install-packages.sh        # Host-admin-only temporary apt installs
-│   └── container-entrypoint.sh    # Start SSHD without regenerating server key
+│   ├── setup.sh                   # SSH key generation, migration, and credential setup
+│   ├── up.sh                      # Firewall verification, image build, and container startup
+│   ├── destroy.sh                 # Environment reset and credential deletion
+│   ├── firewall.sh                # Host iptables bridge isolation rules
+│   ├── verify.sh                  # Configuration and health checks
+│   ├── gh-wrapper.sh              # Scoped credential loader for the gh command
+│   ├── set-gh-token.sh            # Prompt for storing a GitHub PAT
+│   ├── reset-gh-token.sh          # Script to remove the stored GitHub PAT
+│   ├── import-codex-auth.sh       # Script to import existing Codex credentials
+│   ├── reset-codex-auth.sh        # Script to remove stored Codex credentials
+│   ├── install-packages.sh        # Temporary package installation helper
+│   └── container-entrypoint.sh    # Container initialization and Docker socket bridge
 ├── docs/
-│   ├── SECURITY.md
+│   ├── SECURITY.md                # Security boundaries, firewall behavior, and risks
 │   └── agent-sandbox.service.example
-├── tests/test_project.py
-├── ssh/authorized_keys            # Generated: client PUBLIC keys
-├── persistent/                   # Generated and gitignored; never in Docker image
-│   ├── ssh/ssh_host_ed25519_key[.pub]  # Persistent server identity
-│   ├── ssh/authorized_keys              # Persistent client public keys (PC, laptop, phones)
-│   ├── ssh/known_hosts                  # Persistent outgoing SSH host verifications
-│   ├── codex/auth.json                  # Persistent Codex sign-in
-│   └── gh/token                         # Optional fine-grained PAT
-└── .env                          # Generated: non-secret local deployment settings
+├── tests/test_project.py          # Static contract tests
+├── ssh/authorized_keys            # Build-stage public keys
+├── persistent/                    # Host-persisted files mounted at runtime
+│   ├── ssh/ssh_host_ed25519_key[.pub]  # Server host keypair
+│   ├── ssh/authorized_keys        # Allowed client public keys
+│   ├── ssh/known_hosts            # Outbound SSH host verifications
+│   ├── codex/auth.json            # Codex login credentials
+│   └── gh/token                   # GitHub personal access token
+└── .env                           # Local deployment variables
 ```
 
 ## Requirements
 
-On the **Docker host**, install rootful Docker Engine / Compose v2, Tailscale (already logged in), `iptables` with Docker's `DOCKER-USER` chain, `iproute2`, `sudo`, `ssh-keygen`, and Python 3. The scripts expect Docker's **iptables** backend and `tailscale0` on the Docker host itself, not rootless Docker, native nftables Docker firewall mode, a remote Docker context, or Docker Desktop.
+Run this project on a Linux machine with:
+- Docker Engine and Docker Compose v2 (rootful)
+- Active Tailscale connection on the host interface `tailscale0`
+- `iptables` with Docker's `DOCKER-USER` chain enabled
+- `iproute2`, `sudo`, `ssh-keygen`, and Python 3
 
-The deployment uses a dedicated network `172.30.247.0/24` (`br-agentsbx`). Confirm it does not overlap any current network. Builds need public Internet access to Debian repositories, npm, Oh My Zsh, and the Google Antigravity installer.
+The scripts require the standard iptables Docker backend on the host machine. Rootless Docker, native nftables mode, remote Docker contexts, and Docker Desktop are not supported.
 
-## First installation
+The sandbox assigns the subnet `172.30.247.0/24` to a bridge named `br-agentsbx`. Ensure this range does not conflict with existing networks. Building the image requires internet access to fetch Debian packages, npm dependencies, Oh My Zsh, and the Antigravity installer.
 
-On the Tailscale-connected homelab host:
+## Installation
+
+Run setup on the host where Docker and Tailscale are installed:
 
 ```bash
-cd ~/prod
-unzip agent-sandbox-final.zip
-cd agent-sandbox
+cd ~/prod/agent-sandbox
 
-# Authorize the PUBLIC key of the computer from which you will SSH.
+# Authorize your public key (or omit the path to use ~/.ssh/id_ed25519.pub)
 ./scripts/setup.sh ~/agent-key.pub
 
-# Install firewall rules BEFORE creating the container.
+# Configure firewall rules and start the environment
 ./scripts/up.sh
 ./scripts/verify.sh
 ```
 
-The public key must be **on the machine where you run setup**. If the matching private key lives only on your Arch desktop, copy its public half first:
+If your SSH key lives on a separate client machine, copy only the public key to the host first:
 
 ```bash
-# Run on the DESKTOP:
 scp ~/.ssh/id_ed25519.pub nerver@100.118.53.107:~/agent-key.pub
 ```
 
-The script also accepts `~/.ssh/id_ed25519.pub` as the default path. **Do not copy private SSH keys** into the project. Only `ssh/authorized_keys` (the public key) is copied into the image. The SSHD server identity keypair is stored separately in `persistent/ssh/`.
+Never copy private keys into the project. The setup script validates that inputs are public keys.
 
-From an authorized client on the tailnet:
+Connect from an authorized client on your tailnet:
 
 ```bash
 ssh -p 2222 agent@100.118.53.107  # The sandbox
-ssh nerver@100.118.53.107         # The normal homelab (port 22)
+ssh nerver@100.118.53.107         # The host machine
 ```
 
-For convenience, add the following to the SSH **client's** `~/.ssh/config`:
+To simplify connection commands, add entries to `~/.ssh/config` on your client machine:
 
 ```sshconfig
 Host homelab
@@ -118,18 +119,18 @@ Host homelab
     Port 22
     IdentityFile ~/.ssh/id_ed25519
 
-Host agent
+Host agents
     HostName 100.118.53.107
     User agent
     Port 2222
     IdentityFile ~/.ssh/id_ed25519
 ```
 
-Then use `ssh homelab` and `ssh agent`. These two destinations have separate SSH host-key identities. If this is a brand-new installation, compare the SSH fingerprint against `ssh-keygen -lf persistent/ssh/ssh_host_ed25519_key.pub` **on the trusted host** before accepting it on your client.
+You can then run `ssh homelab` or `ssh agents`. The host and container maintain separate SSH server host keys. On first connection, check the fingerprint against `ssh-keygen -lf persistent/ssh/ssh_host_ed25519_key.pub` on the host.
 
-## Day-to-day usage
+## Daily usage
 
-SSH into the sandbox and use its preinstalled tools:
+Log in to the sandbox and run installed tools directly:
 
 ```bash
 cd ~/workspace
@@ -144,21 +145,21 @@ codex
 agy
 ```
 
-The default login shell is Zsh; Fastfetch appears on interactive login. The Starship theme displays the container's **Debian** icon, `agent@agent-sandbox`, directory, Git branch/status, supported language versions, and time. `ls`, `ll`, `la` use Eza; `v` opens Neovim.
+Interactive sessions open in Zsh. Common aliases include `ls` for Eza and `v` for Neovim.
 
-You may install user-local packages or harnesses in `~/.local/bin` or a user npm prefix. They are **lost** on recreate. For temporary system packages, run on the host:
+You can install packages into `~/.local/bin` or an npm user prefix during a session, but these files disappear when the container is recreated. To add temporary packages to a running container, execute the helper script on the host:
 
 ```bash
 ./scripts/install-packages.sh clang-format lldb
 ```
 
-To add a tool permanently, modify `Dockerfile`, rebuild using `./scripts/up.sh`, and verify. The `agent` user has **no sudo**; host-admin scripts deliberately stay on the host.
+To add dependencies permanently, edit `Dockerfile` and rebuild with `./scripts/up.sh`. The `agent` account inside the container has no sudo permissions.
 
-### Codex authentication (persistent)
+### Codex authentication
 
-Codex defaults to the `file` credentials store, `/home/agent/.codex/auth.json`. This path is bind-mounted **read-write** from `persistent/codex/auth.json`, which is UID `10001`, mode `0600`. The setup creates an unauthenticated `{}` file. When you sign in normally through `codex`, credentials and refreshed tokens are written to the same file and survive container recreation. Sessions, logs, custom configuration, shell history, and workspace files do **not** persist.
+Codex stores login data in `/home/agent/.codex/auth.json`. The sandbox mounts this file read-write from `persistent/codex/auth.json` on the host, with ownership set to UID 10001 and permissions to `0600`. The setup script creates an empty JSON object (`{}`) if no file exists. When you run `codex` and sign in, token updates write to this file and persist across container restarts. Other files in `.codex`, such as logs, command caches, and session history, do not persist.
 
-Or import a previously authenticated Codex account (the source should come from a machine you trust):
+To import an existing `auth.json` file from another machine:
 
 ```bash
 docker compose stop
@@ -166,7 +167,7 @@ docker compose stop
 ./scripts/up.sh
 ```
 
-To clear persisted Codex credentials:
+To delete stored Codex credentials:
 
 ```bash
 docker compose stop
@@ -174,109 +175,101 @@ docker compose stop
 ./scripts/up.sh
 ```
 
-**Security and compatibility:** `auth.json` is an agent-readable bearer credential, and all commands running as `agent` can read it. Some future Codex versions might change the location or update behavior (including rename/unlink operations incompatible with a file bind mount). This build expects current in-place writes; `codex logout` may not be able to unlink a bind-mounted file. Use the reset script for local removal and revoke tokens at the provider when required. The `history.persistence = "none"` setting is not a guarantee that a remote provider does not keep server-side history.
+The `auth.json` file is accessible to any command executed by the `agent` user. In-place file updates work with the bind mount, but commands like `codex logout` that attempt to unlink the file directly may fail. Use `reset-codex-auth.sh` to clear local data and revoke sessions through OpenAI if a token is compromised.
 
-### GitHub CLI with a fine-grained PAT (persistent)
+### GitHub credentials
 
-`gh` is preinstalled. A **dedicated fine-grained PAT** is the preferred way to authorize GitHub operations inside this untrusted workspace. Unlike `gh auth login --with-token`, fine-grained PATs are recommended for use through `GH_TOKEN` rather than an interactive credential store. The token stays in `persistent/gh/token`, with owner UID `10001`, mode `0400`; it is mounted read-only at `/opt/agent-secrets/gh_token`. A root-owned wrapper at `/usr/local/bin/gh` loads that token into `GH_TOKEN` **only when launching `gh`**, rather than exporting it to every login shell. The underlying official binary remains `/usr/bin/gh`.
+The image includes the GitHub CLI (`gh`). Using a dedicated fine-grained personal access token (PAT) restricts the agent's access to specified repositories. The token is stored on the host in `persistent/gh/token` (owned by UID 10001, mode `0400`) and mounted read-only at `/opt/agent-secrets/gh_token`. A wrapper at `/usr/local/bin/gh` sets `GH_TOKEN` only during CLI execution instead of exporting it across the user's login shell.
 
-1. Create a token at [GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/personal-access-tokens/new).
-2. Set a **short expiration** and choose **Only select repositories**. Start with the single repository you want to delegate.
-3. Use the smallest necessary **Repository permissions**:
+1. Generate a token in GitHub under personal access tokens (fine-grained tokens).
+2. Choose a short expiration date and restrict repository access to the target project.
+3. Grant only permissions necessary for the task:
 
-   | Agent task | Fine-grained PAT permissions |
+   | Task | Required permissions |
    |---|---|
-   | Read a private repository | **Contents: Read** (plus automatically included Metadata: Read) |
-   | Push a feature branch | **Contents: Read and write** |
-   | Create or update pull requests | **Pull requests: Read and write** (plus Contents: Read and write when pushing branches) |
-   | Edit GitHub Actions workflow files | **Workflows: Read and write** *only if deliberately required* |
-   | Work with issues/comments | Add **Issues** permissions if a specific command needs them |
+   | Inspect a repository | Contents: Read |
+   | Push code branches | Contents: Read and write |
+   | Open pull requests | Pull requests: Read and write (and Contents: Read and write) |
+   | Update GitHub Actions | Workflows: Read and write |
+   | Manage issues | Issues: Read and write |
 
-   For a read-only investigation, don't grant any write permissions. No `admin` rights and no organization-wide/all-repositories token.
-
-4. Store it on the **host** using the hidden prompt (don't paste credentials into your shell command history, Dockerfile, `.env` or chat):
+4. Save the token on the host using the input prompt:
 
 ```bash
 ./scripts/set-gh-token.sh
 ```
 
-5. Verify within the sandbox:
+5. Test access inside the container:
 
 ```bash
-ssh agent
+ssh agents
 gh auth status
 gh repo view OWNER/REPO
 git clone https://github.com/OWNER/REPO.git
 ```
 
-A Git system-level HTTPS credential helper invokes `gh auth git-credential`, so Git operations against `github.com` can use the token when necessary without SSH private keys in the container. The token file can be populated before or after first startup, because it is mounted read-only from the host. `gh auth status` is an online check and certain commands may need more permissions than the examples above.
+Git uses `gh auth git-credential` to authenticate HTTPS operations on `github.com`, allowing clones and pushes without placing SSH private keys inside the container.
 
-**Reset/rotate:** Revoke the old token in GitHub Settings, then use `./scripts/set-gh-token.sh` again; or run `./scripts/reset-gh-token.sh` to clear the local file. The local wrapper cannot protect the token from an agent that can read its own `/opt/agent-secrets/gh_token`; read-only means it cannot overwrite the host copy, **not** that it cannot copy or exfiltrate it. Prefer a GitHub App with short-lived installation tokens for more stringent environments.
+To rotate or remove the token, revoke it in GitHub and run `./scripts/set-gh-token.sh` to write the replacement or `./scripts/reset-gh-token.sh` to delete the local file. The read-only mount prevents the container from editing the file on the host, but processes running as `agent` can still read and transmit the token value.
 
-### Antigravity CLI (`agy`)
+### Antigravity CLI
 
-AGY is installed during the image build using Google's official Linux installer, into the image's `/home/agent/.local/bin/agy`. Launch it with `agy`. Authentication on SSH typically provides a URL to open on your own device; complete the Google sign-in there and return to the terminal. **The AGY session is disposable**: this project does not mount its keyring or account cache. Expect to authenticate again after `docker compose down`. Future versions could offer a narrower, documented file/token storage mechanism.
+The Antigravity CLI (`agy`) is installed in `/home/agent/.local/bin/agy`. To authenticate, run `agy` and follow the URL displayed in the terminal to complete Google account verification in a browser. Session tokens are kept in the container's temporary filesystem and are cleared when the container is recreated with `docker compose down`.
 
-### Docker and Docker Compose (Isolated DinD)
+### Docker and Compose
 
-The workspace container includes `docker`, `docker compose`, and `docker buildx`. Rather than mounting the host's `/var/run/docker.sock` (which would allow an agent to inspect, control, or compromise other homelab containers on the host), Agent Sandbox connects to an isolated **Docker-in-Docker sidecar** (`dind:2375`) on the private sandbox bridge.
+The workspace image includes the Docker CLI, Compose v2, and Buildx. The container connects over the internal network to a Docker-in-Docker sidecar (`dind:2375`) and forwards `/var/run/docker.sock` to that daemon using an internal socket proxy.
 
-- The agent has full Docker capabilities inside its sandbox (e.g. `docker run`, `docker compose up`, building and testing containerized apps).
-- The agent **cannot** see, inspect, stop, or tamper with any homelab or host containers.
-- Outbound traffic from DinD and its containers inherits the host iptables firewall: public registry pulls and Internet connections work, while access to host services, LAN, tailnet, and other Docker bridges is blocked.
-- Configurable resource limits in `.env` (`DIND_MEMORY`, `DIND_CPUS`).
+- The agent can run containers, build images, and test Compose stacks inside its own sandbox.
+- The host Docker daemon is not mounted, so the agent cannot inspect or modify other containers running on the host.
+- Outbound traffic from containers running inside DinD passes through the host firewall. Public downloads succeed, while access to the host, local networks, and Tailscale peers is blocked.
+- Resource limits for the sidecar can be adjusted in `.env` via `DIND_MEMORY` and `DIND_CPUS`.
 
-## Update or migrate a previous Agent Sandbox
+## Upgrading and migrations
 
-**Keep the old container running until `setup.sh` has migrated its SSH host key.** If you remove it first, its identity may be lost and your SSH client will warn about a host-key change.
+Leave the existing container running while you run `setup.sh` so the script can preserve its SSH server host key and credentials.
 
-1. Extract the new ZIP into a **temporary location**. Copy its source files (`Dockerfile`, `compose.yaml`, `scripts/`, `config/`, `docs/`, `tests/`, `.dockerignore`, `.gitignore`, `sshd_config`, README) into `~/prod/agent-sandbox`. Do **not** delete or replace the existing `.env`, `ssh/authorized_keys`, or `persistent/` directory.
-2. With the **old** container still running, run `./scripts/setup.sh ~/agent-key.pub`. It reuses the current SSH server keypair if already persistent, imports it from the prior `ssh/host_keys/` layout if available, or copies it from the running old workspace. It can also import an existing Codex `auth.json` from the old running container.
-3. Optionally run `./scripts/set-gh-token.sh` on the host.
-4. Run `./scripts/up.sh` and `./scripts/verify.sh`, then reconnect from your client. The saved SSH host key means your `known_hosts` entry should remain valid.
+1. Unpack updated files into a temporary directory, then copy source files (`Dockerfile`, `compose.yaml`, `scripts/`, `config/`, `docs/`, `tests/`, `sshd_config`, `README.md`) into your installation folder. Preserve existing `.env`, `ssh/authorized_keys`, and `persistent/` directories.
+2. Run `./scripts/setup.sh`. The script reuses persistent host keys, imports existing keys from previous directory layouts, or pulls them from the running container. It also preserves existing Codex credentials.
+3. Update the GitHub token if needed with `./scripts/set-gh-token.sh`.
+4. Rebuild and restart with `./scripts/up.sh`, then run `./scripts/verify.sh`.
 
-**Recreating the container deletes its writable layer.** Back up or push any work you want to keep before upgrading. This is intentional.
+Push or back up workspace changes before updating, as recreating the container resets its writable filesystem.
 
-## Lifecycle and persistence
+## Container lifecycle
 
-| Operation | Agent code/files | SSH server host key | Codex sign-in | GitHub PAT |
-|---|---|---|---|---|
-| `docker compose stop` / `start` | Preserved | Preserved | Preserved | Preserved |
-| `docker compose restart` | Preserved | Preserved | Preserved | Preserved |
-| `docker compose down` → `./scripts/up.sh` | **Deleted** | Preserved | Preserved | Preserved |
-| `./scripts/up.sh` recreates workspace | **Deleted** | Preserved | Preserved | Preserved |
-| `./scripts/destroy.sh` | **Deleted** | **Deleted** | **Deleted** | **Deleted** |
+| Operation | Workspace files | Server host key | Client authorized keys | Codex credentials | GitHub PAT |
+|---|---|---|---|---|---|
+| `docker compose stop` / `start` | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `docker compose restart` | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `docker compose down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/up.sh` (recreate) | Cleared | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/destroy.sh` | Cleared | Deleted | Deleted | Deleted | Deleted |
 
-Only the persistent SSH key, Codex auth, and optional GitHub PAT are deliberately mounted into the container. **No project directory, homelab folder, other container, or Docker socket is mounted**. The GitHub token remains in a host file; the Codex file is writable to support token refresh.
+Only files in `persistent/` are mounted into the container. Host project folders, other container volumes, and host sockets remain unmapped.
 
-Normal lifecycle:
+Standard management commands:
 
 ```bash
-# Pause without deleting container data
+# Pause and resume without resetting container data
 docker compose stop
 docker compose start
 
-# Reset the ENTIRE agent filesystem but retain the three credential categories
+# Reset the container filesystem while preserving credentials and SSH keys
 docker compose down
 ./scripts/up.sh
 
-# Destroy the sandbox, project-generated host state, logins and SSH identity
+# Remove the sandbox, credentials, firewall rules, and generated state
 ./scripts/destroy.sh
 ```
 
-`docker compose down` does not remove the firewall's host iptables chains; `destroy.sh` removes them. Always use **`./scripts/up.sh`** (rather than plain `docker compose up`) to create/recreate the container: it configures the Docker network and the firewall first. `destroy.sh` does not remove *global Docker build caches, backups, snapshots or provider-side session data* and does not provide forensic erasure. It only targets its own named Compose resources, dedicated Docker network, image if unused, firewall chains and generated state. Other Docker stacks are not deliberately changed.
+`docker compose down` stops the containers but leaves firewall rules active. To restart the environment, use `./scripts/up.sh` so the network and firewall rules are verified before the container starts.
 
-### Full reset and reinstall
+Running `destroy.sh` deletes the SSH host key, rotating the server identity. After running it, update your local `known_hosts` file for port 2222 before reconnecting.
 
-```bash
-./scripts/destroy.sh  # requires typing DESTROY
-./scripts/setup.sh ~/agent-key.pub
-./scripts/up.sh
-```
+## Troubleshooting and verification
 
-A full destroy intentionally rotates the SSH server's identity. Verify the new fingerprint and remove the old `known_hosts` entry for **port 2222 only** after verification.
-
-## Validation and troubleshooting
+Run inspection commands on the host:
 
 ```bash
 ./scripts/verify.sh
@@ -286,34 +279,36 @@ ssh -vvv -p 2222 agent@100.118.53.107
 ssh-keygen -lf persistent/ssh/ssh_host_ed25519_key.pub
 ```
 
-- **SSH authenticates but immediately disconnects:** review the SSHD logs, then verify `AUDIT_WRITE` is present in `cap_add` (needed for Linux SSHD audit events in this configuration).
-- **`REMOTE HOST IDENTIFICATION HAS CHANGED`:** never disable SSH host-key checks to suppress this. Compare fingerprints with the trusted host. `destroy.sh` rotates the key on purpose.
-- **No connection from an actual Tailscale client:** confirm Tailscale ACLs, the host's Tailscale IPv4 in `.env`, firewall, and `tailscale0`. A connection from the host to its *own* Tailscale IP is not proof of remote tailnet ACL enforcement.
-- **Token/auth trouble:** run `stat -c '%u:%a' persistent/codex/auth.json persistent/gh/token` on the host (expect `10001:600` and `10001:400`); validate GitHub token permissions/expiration.
-- **Glyph squares in the prompt:** choose a Nerd Font in your SSH client terminal. Do not copy font files to the container.
-- **Codex cannot use its nested sandbox:** user namespaces/seccomp may prevent nesting a second Linux sandbox inside hardened Docker. Consider running inside a dedicated VM for workloads requiring strict nested sandboxing; don't weaken host Docker permissions casually.
-- **Can't build:** check public network access, npm installer version requirements, and the official AGY installer endpoint. The base installer is upstream-controlled and should be reviewed before trusting it.
+Common issues:
+- SSH connects and disconnects immediately: Check SSHD logs and ensure `AUDIT_WRITE` is included under `cap_add` in `compose.yaml`.
+- Host key warning on reconnect: Verify the fingerprint matches `persistent/ssh/ssh_host_ed25519_key.pub`. Running `destroy.sh` generates a new key.
+- Connection failures over Tailscale: Confirm the Tailscale IP in `.env`, firewall rules on `tailscale0`, and tailnet ACLs for the client device.
+- Credential errors: Check host file permissions with `stat -c '%u:%a' persistent/codex/auth.json persistent/gh/token` (expected: `10001:600` and `10001:400`).
+- Missing icons in prompt: Select a Nerd Font in your terminal emulator settings.
+- Build failures: Check outbound network access to npm and the Antigravity installation endpoints.
 
-Static checks (with Python 3, PyYAML):
+To run the static test suite:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-test.txt
-.venv/bin/python -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v
 ```
 
-`verify.sh` checks live mounts, capabilities, package presence, SSH key consistency and host firewall presence. **Neither test suite establishes VM-grade isolation.** Perform real negative tests against your homelab from the sandbox before entrusting it with sensitive production tasks.
+The script `verify.sh` checks mounts, capabilities, tool availability, and host firewall rules. Test network restrictions directly from inside the container before running untrusted workloads.
 
-## Security and reproducibility
+## Security considerations
 
-This build uses a default `CODEX_VERSION=latest` npm install and upstream Oh My Zsh / AGY installers; **rebuilding later can install newer upstream versions**. Pin Codex via `CODEX_VERSION` in `.env`, and review the other upstream artifacts before considering the image reproducible. The firewall assumes Docker's iptables backend; host restarts or firewall reloads can remove its rules. Use the example systemd boot integration in `docs/` or equivalent ordering to reinstall the firewall before allowing the sandbox to run unattended.
+The image installs the latest versions of Codex, Oh My Zsh, and the Antigravity CLI at build time. To pin a specific Codex release, set `CODEX_VERSION` in `.env`.
 
-**A hardened Docker container shares the kernel of the host.** If you expect agents to execute hostile code or want a robust isolation boundary, place this entire Docker workspace inside a dedicated VM/microVM with its own tailnet identity and egress policy. Read [docs/SECURITY.md](docs/SECURITY.md) for explicit assumptions and non-goals.
+Host reboots or firewall reloads can flush iptables rules. For unattended restarts, install the example systemd unit in `docs/agent-sandbox.service.example` to ensure `up.sh` runs and restores firewall rules before the containers start.
+
+Containers share the host kernel. For untrusted code execution requiring strong isolation, run this project inside a dedicated virtual machine with its own Tailscale identity. Details are documented in [docs/SECURITY.md](docs/SECURITY.md).
 
 ## References
 
-- [Docker firewall and `DOCKER-USER`](https://docs.docker.com/engine/network/firewall-iptables/)
+- [Docker firewall and DOCKER-USER](https://docs.docker.com/engine/network/firewall-iptables/)
 - [OpenAI Codex CLI](https://github.com/openai/codex)
 - [Google Antigravity CLI installation](https://antigravity.google/docs/cli/install/)
 - [GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login) and [fine-grained PAT permissions](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
-- [Starship](https://starship.rs/) · [Oh My Zsh](https://ohmyz.sh/) · [Fastfetch](https://github.com/fastfetch-cli/fastfetch)
+- [Starship](https://starship.rs/)
+- [Oh My Zsh](https://ohmyz.sh/)
+- [Fastfetch](https://github.com/fastfetch-cli/fastfetch)

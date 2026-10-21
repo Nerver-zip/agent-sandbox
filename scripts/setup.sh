@@ -79,7 +79,7 @@ run_priv() {
   elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
     sudo sh -c "$cmd"
   elif command -v docker >/dev/null 2>&1 && docker image inspect agent-sandbox:local >/dev/null 2>&1; then
-    docker run --rm -v "$PWD:/w" -w /w --entrypoint sh agent-sandbox:local -c "$cmd"
+    docker run --rm -v "$PWD:$PWD" -w "$PWD" --entrypoint sh agent-sandbox:local -c "$cmd"
   else
     command -v sudo >/dev/null || fail 'sudo or docker is required for privileged setup operations.'
     sudo sh -c "$cmd"

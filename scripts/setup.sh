@@ -71,19 +71,30 @@ if [[ ! -e "$AUTH_FILE" ]]; then
   fi
 fi
 [[ -f "$AUTH_FILE" && ! -L "$AUTH_FILE" ]] || fail 'Codex auth must be a regular file, not a symlink.'
+
+run_priv() {
+  local cmd=$1
+  if [[ $EUID -eq 0 ]]; then
+    sh -c "$cmd"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo sh -c "$cmd"
+  elif command -v docker >/dev/null 2>&1 && docker image inspect agent-sandbox:local >/dev/null 2>&1; then
+    docker run --rm -v "$PWD:/w" -w /w --entrypoint sh agent-sandbox:local -c "$cmd"
+  else
+    command -v sudo >/dev/null || fail 'sudo or docker is required for privileged setup operations.'
+    sudo sh -c "$cmd"
+  fi
+}
+
 if [[ -r "$AUTH_FILE" ]]; then
   python3 -m json.tool "$AUTH_FILE" >/dev/null || fail 'Codex auth file is invalid JSON.'
 else
-  sudo python3 -m json.tool "$AUTH_FILE" >/dev/null || fail 'Codex auth file is invalid JSON.'
+  run_priv "python3 -m json.tool \"$AUTH_FILE\" >/dev/null" || fail 'Codex auth file is invalid JSON.'
 fi
 # Running container user is UID 10001; keep this secret 0600 and inaccessible to others.
 chmod 0600 "$AUTH_FILE" 2>/dev/null || true
 if [[ "$(stat -c '%u' "$AUTH_FILE")" != 10001 ]]; then
-  if [[ $EUID -eq 0 ]]; then chown 10001:10001 "$AUTH_FILE"
-  else
-    command -v sudo >/dev/null || fail 'sudo is required to set ownership of Codex auth file.'
-    sudo chown 10001:10001 "$AUTH_FILE"
-  fi
+  run_priv "chown 10001:10001 \"$AUTH_FILE\""
 fi
 [[ "$(stat -c '%a' "$AUTH_FILE")" == 600 ]] || fail 'Codex auth file must have mode 0600.'
 
@@ -93,20 +104,17 @@ if [[ ! -e "$GH_TOKEN_FILE" ]]; then
   : > "$GH_TOKEN_FILE"
 fi
 [[ -f "$GH_TOKEN_FILE" && ! -L "$GH_TOKEN_FILE" ]] || fail 'GitHub token must be a regular file, not a symlink.'
-if [[ $(stat -c '%u' "$GH_TOKEN_FILE") != 10001 ]]; then
-  if [[ $EUID -eq 0 ]]; then chown 10001:10001 "$GH_TOKEN_FILE"
-  else sudo chown 10001:10001 "$GH_TOKEN_FILE"; fi
+if [[ $(stat -c '%u:%a' "$GH_TOKEN_FILE") != 10001:400 ]]; then
+  run_priv "chown 10001:10001 \"$GH_TOKEN_FILE\" && chmod 0400 \"$GH_TOKEN_FILE\""
 fi
-if [[ $EUID -eq 0 ]]; then chmod 0400 "$GH_TOKEN_FILE"
-else sudo chmod 0400 "$GH_TOKEN_FILE"; fi
 [[ $(stat -c '%u:%a' "$GH_TOKEN_FILE") == 10001:400 ]] || fail 'GitHub token must be owned by UID 10001, mode 0400.'
 
 # Persist authorized client public keys across container recreations.
 # Supports single-key .pub files and multi-key authorized_keys files (e.g. PC, laptop, phones).
 AUTH_KEYS_FILE="$PWD/persistent/ssh/authorized_keys"
-TMP_RAW_KEYS=$(mktemp)
-TMP_DEDUP_KEYS=$(mktemp)
-trap 'rm -f -- "$TMP_RAW_KEYS" "$TMP_DEDUP_KEYS"' EXIT
+TMP_RAW_KEYS=$(mktemp persistent/ssh/.raw.ak.XXXXXXXX)
+TMP_DEDUP_KEYS=$(mktemp persistent/ssh/.dedup.ak.XXXXXXXX)
+trap 'rm -f -- persistent/ssh/.raw.ak.* persistent/ssh/.dedup.ak.* persistent/ssh/.dump.* persistent/ssh/.install.*' EXIT
 
 collect_keys_from_stream() {
   local label=$1
@@ -124,7 +132,10 @@ if [[ -e "$AUTH_KEYS_FILE" ]]; then
   if [[ -r "$AUTH_KEYS_FILE" ]]; then
     collect_keys_from_stream "$AUTH_KEYS_FILE" < "$AUTH_KEYS_FILE"
   else
-    collect_keys_from_stream "$AUTH_KEYS_FILE" < <(sudo cat "$AUTH_KEYS_FILE")
+    TMP_DUMP=$(mktemp persistent/ssh/.dump.ak.XXXXXXXX)
+    run_priv "cat \"$AUTH_KEYS_FILE\" > \"$TMP_DUMP\" && chmod 0600 \"$TMP_DUMP\""
+    collect_keys_from_stream "$AUTH_KEYS_FILE" < "$TMP_DUMP"
+    rm -f "$TMP_DUMP"
   fi
 fi
 if [[ -f ssh/authorized_keys && -r ssh/authorized_keys ]]; then
@@ -132,7 +143,7 @@ if [[ -f ssh/authorized_keys && -r ssh/authorized_keys ]]; then
 fi
 OLD_CID=$(docker ps -q --filter 'label=com.docker.compose.project=agent-sandbox' --filter 'label=com.docker.compose.service=workspace' | head -n 1)
 if [[ -n "${OLD_CID:-}" ]]; then
-  MIGRATED_AK=$(mktemp)
+  MIGRATED_AK=$(mktemp persistent/ssh/.migrated.ak.XXXXXXXX)
   if docker exec "$OLD_CID" cat /home/agent/.ssh/authorized_keys > "$MIGRATED_AK" 2>/dev/null && [[ -s "$MIGRATED_AK" ]]; then
     collect_keys_from_stream "running container" < "$MIGRATED_AK"
   fi
@@ -152,16 +163,12 @@ install -m 0600 "$TMP_DEDUP_KEYS" ssh/authorized_keys
 if [[ ! -e "$AUTH_KEYS_FILE" ]]; then
   : > "$AUTH_KEYS_FILE"
 fi
-if [[ $EUID -eq 0 ]]; then
-  cat "$TMP_DEDUP_KEYS" > "$AUTH_KEYS_FILE"
-  chown 10001:10001 "$AUTH_KEYS_FILE"
-  chmod 0600 "$AUTH_KEYS_FILE"
-else
-  command -v sudo >/dev/null || fail 'sudo is required to set ownership of persistent authorized_keys.'
-  sudo sh -c 'cat "$1" > "$2" && chown 10001:10001 "$2" && chmod 0600 "$2"' _ "$TMP_DEDUP_KEYS" "$AUTH_KEYS_FILE"
-fi
+TMP_INSTALL=$(mktemp persistent/ssh/.install.ak.XXXXXXXX)
+cp "$TMP_DEDUP_KEYS" "$TMP_INSTALL"
+run_priv "cat \"$TMP_INSTALL\" > \"$AUTH_KEYS_FILE\" && chown 10001:10001 \"$AUTH_KEYS_FILE\" && chmod 0600 \"$AUTH_KEYS_FILE\""
+rm -f "$TMP_INSTALL"
 [[ $(stat -c '%u:%a' "$AUTH_KEYS_FILE") == 10001:600 ]] || fail 'Persistent authorized_keys must be owned by UID 10001, mode 0600.'
-rm -f -- "$TMP_RAW_KEYS" "$TMP_DEDUP_KEYS"
+rm -f -- persistent/ssh/.raw.ak.* persistent/ssh/.dedup.ak.*
 trap - EXIT
 
 # Persist outgoing SSH host key verifications (known_hosts) across container recreations.
@@ -169,7 +176,7 @@ KNOWN_HOSTS_FILE="$PWD/persistent/ssh/known_hosts"
 if [[ ! -e "$KNOWN_HOSTS_FILE" ]]; then
   : > "$KNOWN_HOSTS_FILE"
   if [[ -n "${OLD_CID:-}" ]]; then
-    MIGRATED_KH=$(mktemp)
+    MIGRATED_KH=$(mktemp persistent/ssh/.migrated.kh.XXXXXXXX)
     if docker exec "$OLD_CID" cat /home/agent/.ssh/known_hosts > "$MIGRATED_KH" 2>/dev/null && [[ -s "$MIGRATED_KH" ]]; then
       cat "$MIGRATED_KH" > "$KNOWN_HOSTS_FILE"
       echo 'Migrated SSH known_hosts from running container.'
@@ -178,15 +185,9 @@ if [[ ! -e "$KNOWN_HOSTS_FILE" ]]; then
   fi
 fi
 [[ -f "$KNOWN_HOSTS_FILE" && ! -L "$KNOWN_HOSTS_FILE" ]] || fail 'SSH known_hosts must be a regular file, not a symlink.'
-if [[ $(stat -c '%u' "$KNOWN_HOSTS_FILE") != 10001 ]]; then
-  if [[ $EUID -eq 0 ]]; then chown 10001:10001 "$KNOWN_HOSTS_FILE"
-  else
-    command -v sudo >/dev/null || fail 'sudo is required to set ownership of SSH known_hosts.'
-    sudo chown 10001:10001 "$KNOWN_HOSTS_FILE"
-  fi
+if [[ $(stat -c '%u:%a' "$KNOWN_HOSTS_FILE") != 10001:600 ]]; then
+  run_priv "chown 10001:10001 \"$KNOWN_HOSTS_FILE\" && chmod 0600 \"$KNOWN_HOSTS_FILE\""
 fi
-if [[ $EUID -eq 0 ]]; then chmod 0600 "$KNOWN_HOSTS_FILE"
-else sudo chmod 0600 "$KNOWN_HOSTS_FILE"; fi
 [[ $(stat -c '%u:%a' "$KNOWN_HOSTS_FILE") == 10001:600 ]] || fail 'SSH known_hosts file must be owned by UID 10001, mode 0600.'
 if [[ -f .env ]]; then
   # Fix IP changes while retaining user-provided memory/CPU/port settings.

@@ -12,7 +12,7 @@ fi
 TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
 [[ "$TS_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Tailscale host IPv4 not detected.'
 
-install -d -m 0700 persistent persistent/ssh persistent/codex persistent/gh ssh
+install -d -m 0700 persistent persistent/ssh persistent/codex persistent/gh persistent/git ssh
 HOST_KEY="$PWD/persistent/ssh/ssh_host_ed25519_key"
 HOST_PUB="$HOST_KEY.pub"
 if [[ -f "$HOST_KEY" ]]; then
@@ -189,6 +189,43 @@ if [[ $(stat -c '%u:%a' "$KNOWN_HOSTS_FILE") != 10001:600 ]]; then
   run_priv "chown 10001:10001 \"$KNOWN_HOSTS_FILE\" && chmod 0600 \"$KNOWN_HOSTS_FILE\""
 fi
 [[ $(stat -c '%u:%a' "$KNOWN_HOSTS_FILE") == 10001:600 ]] || fail 'SSH known_hosts file must be owned by UID 10001, mode 0600.'
+
+# Persist Git user configuration across container recreations.
+GIT_DIR="$PWD/persistent/git"
+GIT_CONFIG_FILE="$GIT_DIR/config"
+if [[ ! -e "$GIT_CONFIG_FILE" ]]; then
+  DETECTED_NAME=$(git config --global user.name 2>/dev/null || true)
+  DETECTED_EMAIL=$(git config --global user.email 2>/dev/null || true)
+
+  if [[ -z "$DETECTED_NAME" || -z "$DETECTED_EMAIL" ]]; then
+    if [[ -n "${OLD_CID:-}" ]]; then
+      [[ -z "$DETECTED_NAME" ]] && DETECTED_NAME=$(docker exec "$OLD_CID" git config --global user.name 2>/dev/null || true)
+      [[ -z "$DETECTED_EMAIL" ]] && DETECTED_EMAIL=$(docker exec "$OLD_CID" git config --global user.email 2>/dev/null || true)
+    fi
+  fi
+
+  [[ -z "$DETECTED_NAME" ]] && DETECTED_NAME="${GIT_AUTHOR_NAME:-${USER:-agent}}"
+  [[ -z "$DETECTED_EMAIL" ]] && DETECTED_EMAIL="${GIT_AUTHOR_EMAIL:-${USER:-agent}@users.noreply.github.com}"
+
+  cat > "$GIT_CONFIG_FILE" <<EOF
+[user]
+	name = $DETECTED_NAME
+	email = $DETECTED_EMAIL
+[init]
+	defaultBranch = main
+EOF
+  echo "Initialized Git identity ($DETECTED_NAME <$DETECTED_EMAIL>)."
+else
+  echo 'Keeping existing Git configuration.'
+fi
+[[ -f "$GIT_CONFIG_FILE" && ! -L "$GIT_CONFIG_FILE" ]] || fail 'Git config must be a regular file, not a symlink.'
+if [[ $(stat -c '%u:%a' "$GIT_DIR") != 10001:700 ]]; then
+  run_priv "chown -R 10001:10001 \"$GIT_DIR\" && chmod 0700 \"$GIT_DIR\""
+fi
+if [[ $(stat -c '%u:%a' "$GIT_CONFIG_FILE") != 10001:600 ]]; then
+  run_priv "chown 10001:10001 \"$GIT_CONFIG_FILE\" && chmod 0600 \"$GIT_CONFIG_FILE\""
+fi
+[[ $(stat -c '%u:%a' "$GIT_CONFIG_FILE") == 10001:600 ]] || fail 'Git config file must be owned by UID 10001, mode 0600.'
 if [[ -f .env ]]; then
   # Fix IP changes while retaining user-provided memory/CPU/port settings.
   [[ -L .env ]] && fail '.env must not be a symlink.'
@@ -216,4 +253,4 @@ fi
 chmod 0600 .env
 printf '\nSetup complete. Tailscale host IP: %s\n' "$TS_IP"
 echo 'Run ./scripts/up.sh to deploy.'
-echo 'SSH host identity, Codex auth and optional GitHub PAT persist across docker compose down.'
+echo 'SSH host identity, Codex auth, Git config and optional GitHub PAT persist across docker compose down.'

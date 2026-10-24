@@ -33,9 +33,10 @@ class ProjectContractTests(unittest.TestCase):
                 "./persistent/ssh/known_hosts:/home/agent/.ssh/known_hosts:rw",
                 "./persistent/codex/auth.json:/home/agent/.codex/auth.json:rw",
                 "./persistent/gh/token:/opt/agent-secrets/gh_token:ro",
+                "./persistent/git:/home/agent/.config/git:rw",
             },
         )
-        self.assertEqual(len(self.s["volumes"]), 6)
+        self.assertEqual(len(self.s["volumes"]), 7)
 
     def test_network(self):
         self.assertTrue(self.c["networks"]["sandbox"]["external"])
@@ -64,6 +65,7 @@ class ProjectContractTests(unittest.TestCase):
             "npm install --global", "@openai/codex", "antigravity.google/cli/install.sh",
             "config/tmux.conf",
             "gh-wrapper.sh", "credential.https://github.com.helper", "useradd --create-home",
+            ".config/git",
         ):
             with self.subTest(v=v):
                 self.assertIn(v, d)
@@ -86,7 +88,7 @@ class ProjectContractTests(unittest.TestCase):
         for v in (
             "ssh-keygen -y", "ssh/host_keys/", "/etc/ssh/ssh_host_ed25519_key",
             "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
-            "persistent/codex/auth.json", "persistent/gh/token",
+            "persistent/codex/auth.json", "persistent/gh/token", "persistent/git",
             "chown 10001:10001", "chmod 0400",
         ):
             self.assertIn(v, setup)
@@ -103,7 +105,8 @@ class ProjectContractTests(unittest.TestCase):
             "docker compose down --remove-orphans --volumes",
             "firewall.sh remove", "persistent/ssh/ssh_host_ed25519_key",
             "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
-            "persistent/codex/auth.json", "persistent/gh/token", "ssh/authorized_keys .env",
+            "persistent/codex/auth.json", "persistent/gh/token", "persistent/git/config",
+            "ssh/authorized_keys .env",
         ):
             self.assertIn(v, d)
 

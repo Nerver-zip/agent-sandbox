@@ -5,6 +5,9 @@ test -s /etc/ssh/ssh_host_ed25519_key
 test -s /etc/ssh/ssh_host_ed25519_key.pub
 test -f /home/agent/.codex/auth.json
 chown -R agent:agent /home/agent/.codex 2>/dev/null || true
+test -f /home/agent/.config/git/config
+chown -R agent:agent /home/agent/.config/git 2>/dev/null || true
+ln -sf /home/agent/.config/git/config /home/agent/.gitconfig 2>/dev/null || true
 mkdir -p /run/sshd
 chmod 0755 /run/sshd
 rm -f /var/run/docker.sock

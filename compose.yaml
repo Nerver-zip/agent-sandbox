@@ -33,6 +33,8 @@ services:
       # Only Codex auth.json persists. Sessions, logs, cache, config and workspace do not.
       # Owner UID 10001 on host, file mode 0600. User agent can read/write bearer credentials.
       - ./persistent/codex/auth.json:/home/agent/.codex/auth.json:rw
+      # Git configuration (user.name and user.email) persists across container recreations.
+      - ./persistent/git:/home/agent/.config/git:rw
     read_only: false # Agent is allowed to develop and install user-space tools in its own container.
     privileged: false
     cap_drop: [ALL]

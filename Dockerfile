@@ -29,7 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && install -d -m 0700 -o agent -g agent /home/agent/.ssh /home/agent/.codex \
     && install -d -m 0755 /run/sshd \
     && rm -f /etc/ssh/ssh_host_*key* \
-    && mkdir -p /home/agent/workspace /home/agent/.config/starship /opt/agent-secrets \
+    && mkdir -p /home/agent/workspace /home/agent/.config/starship /home/agent/.config/git /opt/agent-secrets \
+    && ln -sf /home/agent/.config/git/config /home/agent/.gitconfig \
     && chown -R agent:agent /home/agent
 
 # Build-time CLIs are installed into immutable image layers, not into the disposable workspace.

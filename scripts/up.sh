@@ -13,6 +13,8 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 [[ $(stat -c '%u:%a' persistent/codex/auth.json) == 10001:600 ]] || fail 'Codex auth file must be owned by UID 10001, mode 0600.'
 [[ $(stat -c '%u:%a' persistent/ssh/authorized_keys) == 10001:600 ]] || fail 'Persistent authorized_keys must be owned by UID 10001, mode 0600.'
 [[ $(stat -c '%u:%a' persistent/ssh/known_hosts) == 10001:600 ]] || fail 'SSH known_hosts file must be owned by UID 10001, mode 0600.'
+[[ -f persistent/git/config ]] || fail 'Git config file missing. Run setup.'
+[[ $(stat -c '%u:%a' persistent/git/config) == 10001:600 ]] || fail 'Git config file must be owned by UID 10001, mode 0600.'
 command -v docker >/dev/null || fail 'Docker not installed.'
 command -v tailscale >/dev/null || fail 'Tailscale not installed.'
 command -v ip >/dev/null || fail 'iproute2 not installed.'
@@ -52,4 +54,4 @@ docker compose config --quiet
 docker compose up --build -d --remove-orphans
 PORT=$(sed -n 's/^AGENT_SSH_PORT=//p' .env | tail -n 1)
 printf '\nAgent Sandbox ready: ssh -p %s agent@%s\n' "${PORT:-2222}" "$TS_CURRENT"
-echo 'Container filesystem is disposable. SSH host identity, Codex auth and GitHub PAT persist.'
+echo 'Container filesystem is disposable. SSH host identity, Codex auth, Git config and GitHub PAT persist.'

@@ -18,7 +18,7 @@ This setup does not provide virtual machine isolation or protect against kernel 
 | GitHub integration | GitHub CLI (`gh`), optional fine-grained PAT mounted read-only, and HTTPS Git credential helper |
 | Network access | OpenSSH service listening on the host Tailscale address at port 2222 with public-key authentication |
 | Isolation controls | Dedicated Docker bridge, host firewall rules, unprivileged user, and resource limits (CPU, memory, PIDs) |
-| Persistent state | Server host key, client `authorized_keys`, `known_hosts`, Codex `auth.json`, and GitHub PAT |
+| Persistent state | Server host key, client `authorized_keys`, `known_hosts`, Codex `auth.json`, GitHub PAT, and Git config |
 
 Install a Nerd Font on your terminal emulator to display the Starship prompt symbols correctly.
 
@@ -64,7 +64,8 @@ agent-sandbox/
 │   ├── ssh/authorized_keys        # Allowed client public keys
 │   ├── ssh/known_hosts            # Outbound SSH host verifications
 │   ├── codex/auth.json            # Codex login credentials
-│   └── gh/token                   # GitHub personal access token
+│   ├── gh/token                   # GitHub personal access token
+│   └── git/config                 # Git user configuration (name and email)
 └── .env                           # Local deployment variables
 ```
 
@@ -212,6 +213,10 @@ Git uses `gh auth git-credential` to authenticate HTTPS operations on `github.co
 
 To rotate or remove the token, revoke it in GitHub and run `./scripts/set-gh-token.sh` to write the replacement or `./scripts/reset-gh-token.sh` to delete the local file. The read-only mount prevents the container from editing the file on the host, but processes running as `agent` can still read and transmit the token value.
 
+### Git identity
+
+The setup script automatically detects the host machine's `user.name` and `user.email` from Git and writes them to `persistent/git/config`. This directory is mounted at `/home/agent/.config/git`, allowing `git commit` and `git config --global` to operate directly inside the container without manual configuration. Changes made with `git config --global` inside the sandbox persist across container recreations.
+
 ### Antigravity CLI
 
 The Antigravity CLI (`agy`) is installed in `/home/agent/.local/bin/agy`. To authenticate, run `agy` and follow the URL displayed in the terminal to complete Google account verification in a browser. Session tokens are kept in the container's temporary filesystem and are cleared when the container is recreated with `docker compose down`.
@@ -238,13 +243,13 @@ Push or back up workspace changes before updating, as recreating the container r
 
 ## Container lifecycle
 
-| Operation | Workspace files | Server host key | Client authorized keys | Codex credentials | GitHub PAT |
-|---|---|---|---|---|---|
-| `docker compose stop` / `start` | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `docker compose restart` | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `docker compose down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved |
-| `./scripts/up.sh` (recreate) | Cleared | Preserved | Preserved | Preserved | Preserved |
-| `./scripts/destroy.sh` | Cleared | Deleted | Deleted | Deleted | Deleted |
+| Operation | Workspace files | Server host key | Client authorized keys | Codex credentials | GitHub PAT | Git config |
+|---|---|---|---|---|---|---|
+| `docker compose stop` / `start` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `docker compose restart` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `docker compose down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/up.sh` (recreate) | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/destroy.sh` | Cleared | Deleted | Deleted | Deleted | Deleted | Deleted |
 
 Only files in `persistent/` are mounted into the container. Host project folders, other container volumes, and host sockets remain unmapped.
 

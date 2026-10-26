@@ -12,7 +12,7 @@ fi
 TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
 [[ "$TS_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Tailscale host IPv4 not detected.'
 
-install -d -m 0700 persistent persistent/ssh persistent/codex persistent/gh persistent/git ssh
+install -d -m 0700 persistent persistent/ssh persistent/codex persistent/gh ssh
 HOST_KEY="$PWD/persistent/ssh/ssh_host_ed25519_key"
 HOST_PUB="$HOST_KEY.pub"
 if [[ -f "$HOST_KEY" ]]; then
@@ -193,7 +193,14 @@ fi
 # Persist Git user configuration across container recreations.
 GIT_DIR="$PWD/persistent/git"
 GIT_CONFIG_FILE="$GIT_DIR/config"
-if [[ ! -e "$GIT_CONFIG_FILE" ]]; then
+if [[ ! -d "$GIT_DIR" ]]; then
+  install -d -m 0755 "$GIT_DIR"
+  run_priv "chown 10001:10001 \"$GIT_DIR\" && chmod 0755 \"$GIT_DIR\""
+fi
+
+if [[ -f "$GIT_CONFIG_FILE" && -s "$GIT_CONFIG_FILE" ]]; then
+  echo 'Keeping existing Git configuration.'
+else
   DETECTED_NAME=$(git config --global user.name 2>/dev/null || true)
   DETECTED_EMAIL=$(git config --global user.email 2>/dev/null || true)
 
@@ -207,20 +214,21 @@ if [[ ! -e "$GIT_CONFIG_FILE" ]]; then
   [[ -z "$DETECTED_NAME" ]] && DETECTED_NAME="${GIT_AUTHOR_NAME:-${USER:-agent}}"
   [[ -z "$DETECTED_EMAIL" ]] && DETECTED_EMAIL="${GIT_AUTHOR_EMAIL:-${USER:-agent}@users.noreply.github.com}"
 
-  cat > "$GIT_CONFIG_FILE" <<EOF
+  TMP_GIT=$(mktemp)
+  cat > "$TMP_GIT" <<EOF
 [user]
 	name = $DETECTED_NAME
 	email = $DETECTED_EMAIL
 [init]
 	defaultBranch = main
 EOF
+  run_priv "cat \"$TMP_GIT\" > \"$GIT_CONFIG_FILE\" && chown 10001:10001 \"$GIT_CONFIG_FILE\" && chmod 0600 \"$GIT_CONFIG_FILE\""
+  rm -f "$TMP_GIT"
   echo "Initialized Git identity ($DETECTED_NAME <$DETECTED_EMAIL>)."
-else
-  echo 'Keeping existing Git configuration.'
 fi
 [[ -f "$GIT_CONFIG_FILE" && ! -L "$GIT_CONFIG_FILE" ]] || fail 'Git config must be a regular file, not a symlink.'
-if [[ $(stat -c '%u:%a' "$GIT_DIR") != 10001:700 ]]; then
-  run_priv "chown -R 10001:10001 \"$GIT_DIR\" && chmod 0700 \"$GIT_DIR\""
+if [[ $(stat -c '%u:%a' "$GIT_DIR") != 10001:755 ]]; then
+  run_priv "chown 10001:10001 \"$GIT_DIR\" && chmod 0755 \"$GIT_DIR\""
 fi
 if [[ $(stat -c '%u:%a' "$GIT_CONFIG_FILE") != 10001:600 ]]; then
   run_priv "chown 10001:10001 \"$GIT_CONFIG_FILE\" && chmod 0600 \"$GIT_CONFIG_FILE\""

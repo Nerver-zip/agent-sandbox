@@ -14,11 +14,11 @@ This setup does not provide virtual machine isolation or protect against kernel 
 | Shell and terminal | Zsh, [Oh My Zsh](https://ohmyz.sh/), `git` plugin, autosuggestions, syntax highlighting, Starship prompt, Fastfetch |
 | Development tools | Neovim, tmux, eza, fzf, ripgrep, fd, jq, htop, Git, curl, Python, pipx, Node.js/npm, C/C++ toolchain, CMake |
 | Docker runtime | Docker CLI, Compose v2, and Buildx connected to an isolated Docker-in-Docker (`dind`) sidecar |
-| Agent CLIs | [Codex CLI](https://github.com/openai/codex) (`codex`) and [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`) built into the image |
+| Agent CLIs | [Codex CLI](https://github.com/openai/codex) (`codex`), [Claude Code](https://github.com/anthropics/claude-code) (`claude`), and [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`) built into the image |
 | GitHub integration | GitHub CLI (`gh`), optional fine-grained PAT mounted read-only, and HTTPS Git credential helper |
 | Network access | OpenSSH service listening on the host Tailscale address at port 2222 with public-key authentication |
 | Isolation controls | Dedicated Docker bridge, host firewall rules, unprivileged user, and resource limits (CPU, memory, PIDs) |
-| Persistent state | Server host key, client `authorized_keys`, `known_hosts`, Codex `auth.json`, GitHub PAT, and Git config |
+| Persistent state | Server host key, client `authorized_keys`, `known_hosts`, Codex `auth.json`, Claude `.credentials.json`, GitHub PAT, and Git config |
 
 Install a Nerd Font on your terminal emulator to display the Starship prompt symbols correctly.
 
@@ -39,9 +39,11 @@ agent-sandbox/
 ├── config/
 │   ├── agent.zshrc                # Shell configuration and alias definitions
 │   ├── starship.toml              # Prompt layout and theme
-│   ├── codex.toml                 # Codex CLI file credential storage settings
+│   ├── codex.toml                 # Codex CLI settings (reasoning, TUI statusline, subagents)
 │   ├── tmux.conf                  # Scrollback buffer and mouse configuration
-│   └── nvim/                      # Minimal Neovim setup (Catppuccin, Telescope, Nvim-Tree)
+│   ├── nvim/                      # Minimal Neovim setup (Catppuccin, Telescope, Nvim-Tree)
+│   ├── claude/                    # Claude Code configuration, preferences, and statusline
+│   └── gemini/                    # Antigravity CLI preferences and Catppuccin theme
 ├── scripts/
 │   ├── setup.sh                   # SSH key generation, migration, and credential setup
 │   ├── up.sh                      # Firewall verification, image build, and container startup
@@ -53,6 +55,8 @@ agent-sandbox/
 │   ├── reset-gh-token.sh          # Script to remove the stored GitHub PAT
 │   ├── import-codex-auth.sh       # Script to import existing Codex credentials
 │   ├── reset-codex-auth.sh        # Script to remove stored Codex credentials
+│   ├── import-claude-auth.sh      # Script to import existing Claude Code credentials
+│   ├── reset-claude-auth.sh       # Script to remove stored Claude Code credentials
 │   ├── install-packages.sh        # Temporary package installation helper
 │   └── container-entrypoint.sh    # Container initialization and Docker socket bridge
 ├── docs/
@@ -65,6 +69,7 @@ agent-sandbox/
 │   ├── ssh/authorized_keys        # Allowed client public keys
 │   ├── ssh/known_hosts            # Outbound SSH host verifications
 │   ├── codex/auth.json            # Codex login credentials
+│   ├── claude/.credentials.json   # Claude Code OAuth credentials
 │   ├── gh/token                   # GitHub personal access token
 │   └── git/config                 # Git user configuration (name and email)
 └── .env                           # Local deployment variables
@@ -138,12 +143,14 @@ Log in to the sandbox and run installed tools directly:
 cd ~/workspace
 fastfetch
 codex --version
+claude --version
 agy --version
 gh --version
 tmux new -s agents
 
 # Start coding agents
 codex
+claude
 agy
 ```
 
@@ -185,6 +192,28 @@ docker compose stop
 ```
 
 The `auth.json` file is accessible to any command executed by the `agent` user. In-place file updates work with the bind mount, but commands like `codex logout` that attempt to unlink the file directly may fail. Use `reset-codex-auth.sh` to clear local data and revoke sessions through OpenAI if a token is compromised.
+
+### Claude Code authentication
+
+Claude Code credentials are saved in `/home/agent/.claude/.credentials.json`. The sandbox mounts this file from `persistent/claude/.credentials.json` on the host, owned by UID 10001 with file mode `0600`. When you run `claude` and complete OAuth, the credentials write to this file and persist across container recreations. Ephemeral files such as project session logs, shell snapshots, and debug traces do not persist.
+
+The image includes generic preferences in `/home/agent/.claude/settings.json`, `/home/agent/.claude/CLAUDE.md`, and a Catppuccin Mocha statusline in `/home/agent/.claude/statusline.sh`.
+
+To import existing Claude credentials:
+
+```bash
+docker compose stop
+./scripts/import-claude-auth.sh /path/to/.credentials.json
+./scripts/up.sh
+```
+
+To delete stored Claude credentials:
+
+```bash
+docker compose stop
+./scripts/reset-claude-auth.sh
+./scripts/up.sh
+```
 
 ### GitHub credentials
 
@@ -251,13 +280,13 @@ Push or back up workspace changes before updating, as recreating the container r
 
 ## Container lifecycle
 
-| Operation | Workspace files | Server host key | Client authorized keys | Codex credentials | GitHub PAT | Git config |
-|---|---|---|---|---|---|---|
-| `docker compose stop` / `start` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `docker compose restart` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `docker compose down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `./scripts/up.sh` (recreate) | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `./scripts/destroy.sh` | Cleared | Deleted | Deleted | Deleted | Deleted | Deleted |
+| Operation | Workspace files | Server host key | Client authorized keys | Codex credentials | Claude credentials | GitHub PAT | Git config |
+|---|---|---|---|---|---|---|---|
+| `docker compose stop` / `start` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `docker compose restart` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `docker compose down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/up.sh` (recreate) | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/destroy.sh` | Cleared | Deleted | Deleted | Deleted | Deleted | Deleted | Deleted |
 
 Only files in `persistent/` are mounted into the container. Host project folders, other container volumes, and host sockets remain unmapped.
 

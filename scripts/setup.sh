@@ -12,7 +12,7 @@ fi
 TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
 [[ "$TS_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Tailscale host IPv4 not detected.'
 
-install -d -m 0700 persistent persistent/ssh persistent/codex persistent/gh ssh
+install -d -m 0700 persistent persistent/ssh persistent/codex persistent/claude persistent/gh ssh
 HOST_KEY="$PWD/persistent/ssh/ssh_host_ed25519_key"
 HOST_PUB="$HOST_KEY.pub"
 if [[ -f "$HOST_KEY" ]]; then
@@ -97,6 +97,36 @@ if [[ "$(stat -c '%u' "$AUTH_FILE")" != 10001 ]]; then
   run_priv "chown 10001:10001 \"$AUTH_FILE\""
 fi
 [[ "$(stat -c '%a' "$AUTH_FILE")" == 600 ]] || fail 'Codex auth file must have mode 0600.'
+
+# Persist ONLY the Claude Code credentials file; all other Claude files are disposable.
+# {} is valid unauthenticated state, unlike an empty (invalid JSON) file.
+CLAUDE_AUTH_FILE="$PWD/persistent/claude/.credentials.json"
+if [[ ! -e "$CLAUDE_AUTH_FILE" ]]; then
+  printf '{}\n' > "$CLAUDE_AUTH_FILE"
+  # Migrate the CURRENT (running) Claude credentials, if present.
+  OLD_CID=$(docker ps -q --filter 'label=com.docker.compose.project=agent-sandbox' --filter 'label=com.docker.compose.service=workspace' | head -n 1)
+  if [[ -n "$OLD_CID" ]]; then
+    MIGRATED_CLAUDE=$(mktemp)
+    if docker exec "$OLD_CID" cat /home/agent/.claude/.credentials.json > "$MIGRATED_CLAUDE" 2>/dev/null && \
+       [[ -s "$MIGRATED_CLAUDE" ]] && python3 -m json.tool "$MIGRATED_CLAUDE" >/dev/null 2>&1; then
+      cat "$MIGRATED_CLAUDE" > "$CLAUDE_AUTH_FILE"
+      echo 'Migrated Claude Code login from running container.'
+    fi
+    rm -f "$MIGRATED_CLAUDE"
+  fi
+fi
+[[ -f "$CLAUDE_AUTH_FILE" && ! -L "$CLAUDE_AUTH_FILE" ]] || fail 'Claude credentials must be a regular file, not a symlink.'
+
+if [[ -r "$CLAUDE_AUTH_FILE" ]]; then
+  python3 -m json.tool "$CLAUDE_AUTH_FILE" >/dev/null || fail 'Claude credentials file is invalid JSON.'
+else
+  run_priv "python3 -m json.tool \"$CLAUDE_AUTH_FILE\" >/dev/null" || fail 'Claude credentials file is invalid JSON.'
+fi
+chmod 0600 "$CLAUDE_AUTH_FILE" 2>/dev/null || true
+if [[ "$(stat -c '%u' "$CLAUDE_AUTH_FILE")" != 10001 ]]; then
+  run_priv "chown 10001:10001 \"$CLAUDE_AUTH_FILE\""
+fi
+[[ "$(stat -c '%a' "$CLAUDE_AUTH_FILE")" == 600 ]] || fail 'Claude credentials file must have mode 0600.'
 
 # Optional fine-grained GitHub token. Empty = unauthenticated gh until set-gh-token.sh.
 GH_TOKEN_FILE="$PWD/persistent/gh/token"
@@ -254,6 +284,7 @@ AGENT_SSH_PORT=2222
 AGENT_MEMORY=3g
 AGENT_CPUS=2.0
 CODEX_VERSION=latest
+CLAUDE_VERSION=latest
 DIND_MEMORY=4g
 DIND_CPUS=2.0
 CONF
@@ -261,4 +292,4 @@ fi
 chmod 0600 .env
 printf '\nSetup complete. Tailscale host IP: %s\n' "$TS_IP"
 echo 'Run ./scripts/up.sh to deploy.'
-echo 'SSH host identity, Codex auth, Git config and optional GitHub PAT persist across docker compose down.'
+echo 'SSH host identity, Codex auth, Claude credentials, Git config and optional GitHub PAT persist across docker compose down.'

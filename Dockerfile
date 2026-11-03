@@ -3,6 +3,7 @@
 FROM debian:trixie-slim
 
 ARG CODEX_VERSION=latest
+ARG CLAUDE_VERSION=latest
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     EDITOR=nvim VISUAL=nvim \
@@ -26,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && groupadd -r docker \
     && useradd --create-home --uid 10001 --shell /usr/bin/zsh -G docker agent \
     && passwd -d agent \
-    && install -d -m 0700 -o agent -g agent /home/agent/.ssh /home/agent/.codex \
+    && install -d -m 0700 -o agent -g agent /home/agent/.ssh /home/agent/.codex /home/agent/.claude /home/agent/.gemini \
     && install -d -m 0755 /run/sshd \
     && rm -f /etc/ssh/ssh_host_*key* \
     && mkdir -p /home/agent/workspace /home/agent/.config/starship /home/agent/.config/git /opt/agent-secrets \
@@ -34,10 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R agent:agent /home/agent
 
 # Build-time CLIs are installed into immutable image layers, not into the disposable workspace.
-# CODEX_VERSION can be pinned using --build-arg or via compose.yaml build.args.
-RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
+# CODEX_VERSION and CLAUDE_VERSION can be pinned using --build-arg or via compose.yaml build.args.
+RUN npm install --global "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
     && command -v codex && codex --version \
-    && chown -R agent:agent /home/agent/.codex
+    && command -v claude && claude --version \
+    && chown -R agent:agent /home/agent/.codex /home/agent/.claude
 
 # Remote Oh My Zsh source (track updates explicitly by rebuilding).
 RUN git clone --depth 1 https://github.com/ohmyzsh/ohmyzsh.git /opt/oh-my-zsh \
@@ -56,6 +58,9 @@ COPY --chown=agent:agent --chmod=0600 ssh/authorized_keys /home/agent/.ssh/autho
 COPY --chown=agent:agent --chmod=0644 config/agent.zshrc /home/agent/.zshrc
 COPY --chown=agent:agent --chmod=0644 config/starship.toml /home/agent/.config/starship/starship.toml
 COPY --chown=agent:agent --chmod=0644 config/codex.toml /home/agent/.codex/config.toml
+COPY --chown=agent:agent config/claude /home/agent/.claude
+RUN chmod 0755 /home/agent/.claude/statusline.sh 2>/dev/null || true
+COPY --chown=agent:agent config/gemini /home/agent/.gemini
 COPY --chown=agent:agent --chmod=0644 config/tmux.conf /home/agent/.tmux.conf
 COPY --chown=agent:agent config/nvim /home/agent/.config/nvim
 RUN su -s /bin/bash agent -c 'nvim --headless -c "lua require(\"lazy\").sync({ wait = true })" -c "qa"' 2>/dev/null || true

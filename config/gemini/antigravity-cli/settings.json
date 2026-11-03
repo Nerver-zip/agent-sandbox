@@ -1,0 +1,14 @@
+{
+  "allowNonWorkspaceAccess": true,
+  "model": "Gemini 3.8 Flash (High)",
+  "notifications": true,
+  "statusLine": {
+    "type": "",
+    "command": "",
+    "enabled": true
+  },
+  "toolPermission": "proceed-in-sandbox",
+  "trustedWorkspaces": [
+    "/home/agent/workspace"
+  ]
+}

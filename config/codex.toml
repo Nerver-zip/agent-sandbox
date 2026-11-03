@@ -1,5 +1,28 @@
 # Persist credentials in CODEX_HOME/auth.json only.
 # Config, history, sessions, caches, and workspace are baked/ephemeral.
 cli_auth_credentials_store = "file"
+
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
+service_tier = "default"
+
 [history]
 persistence = "none"
+
+[tui]
+status_line = ["model-with-reasoning", "current-dir", "run-state", "context-remaining", "five-hour-limit", "weekly-limit"]
+status_line_use_colors = true
+vim_mode_default = true
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 5
+default_subagent_model = "gpt-6-luna"
+default_subagent_reasoning_effort = "max"
+
+[features]
+js_repl = false
+memories = true
+
+[desktop]
+appearanceDarkCodeThemeId = "catppuccin"

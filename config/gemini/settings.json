@@ -1,0 +1,20 @@
+{
+  "general": {
+    "previewFeatures": true,
+    "vimMode": true,
+    "preferredEditor": "neovim"
+  },
+  "ui": {
+    "footer": {
+      "hideContextPercentage": false
+    },
+    "showMemoryUsage": true,
+    "theme": "/home/agent/.gemini/themes/catppuccin-mocha.json",
+    "inlineThinkingMode": "full"
+  },
+  "context": {
+    "fileFiltering": {
+      "respectGitIgnore": false
+    }
+  }
+}

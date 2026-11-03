@@ -10,15 +10,17 @@ CID=$(docker compose ps -q workspace)
 pass 'Container running'
 [[ "$(docker inspect -f '{{.HostConfig.Privileged}}' "$CID")" == false ]] || fail 'Privileged container is forbidden.'
 [[ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CID")" != host ]] || fail 'Host network is forbidden.'
-[[ "$(docker inspect -f '{{len .Mounts}}' "$CID")" == 7 ]] || fail 'Expected only 7 persistent file mounts.'
+[[ "$(docker inspect -f '{{len .Mounts}}' "$CID")" == 8 ]] || fail 'Expected only 8 persistent file mounts.'
 MOUNTS=$(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$CID" | grep -v '^$' | sort)
-EXPECTED=$(printf '%s\n' /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub /home/agent/.codex/auth.json /home/agent/.config/git /home/agent/.ssh/authorized_keys /home/agent/.ssh/known_hosts /opt/agent-secrets/gh_token | sort)
+EXPECTED=$(printf '%s\n' /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub /home/agent/.claude/.credentials.json /home/agent/.codex/auth.json /home/agent/.config/git /home/agent/.ssh/authorized_keys /home/agent/.ssh/known_hosts /opt/agent-secrets/gh_token | sort)
 [[ "$MOUNTS" == "$EXPECTED" ]] || fail 'Unexpected mounts detected.'
-pass 'Exactly seven allowlisted file mounts'
+pass 'Exactly eight allowlisted file mounts'
 docker inspect -f '{{range .HostConfig.CapAdd}}{{println .}}{{end}}' "$CID" | grep -q 'AUDIT_WRITE' || fail 'AUDIT_WRITE required for SSHD'
 pass 'SSHD audit capability present'
 [[ $(stat -c '%u:%a' persistent/codex/auth.json) == 10001:600 ]] || fail 'Codex auth file ownership/permissions invalid'
 pass 'Persisted Codex auth is UID 10001, mode 0600'
+[[ $(stat -c '%u:%a' persistent/claude/.credentials.json) == 10001:600 ]] || fail 'Claude credentials file ownership/permissions invalid'
+pass 'Persisted Claude credentials is UID 10001, mode 0600'
 [[ $(stat -c '%u:%a' persistent/gh/token) == 10001:400 ]] || fail 'GitHub token permissions invalid'
 pass 'Persisted GitHub PAT is UID 10001, mode 0400 (read-only mount)'
 [[ $(stat -c '%u:%a' persistent/ssh/authorized_keys) == 10001:600 ]] || fail 'SSH authorized_keys permissions invalid'
@@ -28,7 +30,7 @@ pass 'Persisted SSH known_hosts is UID 10001, mode 0600'
 [[ $(stat -c '%u:%a' persistent/git/config) == 10001:600 ]] || fail 'Git config permissions invalid'
 pass 'Persisted Git config is UID 10001, mode 0600'
 docker compose exec -T --user agent workspace bash -c \
-  'test ! -r /etc/ssh/ssh_host_ed25519_key && test -r /opt/agent-secrets/gh_token && test ! -w /opt/agent-secrets/gh_token && test -w /home/agent/.codex/auth.json && test -w /home/agent/.ssh/authorized_keys && test -w /home/agent/.ssh/known_hosts && test -w /home/agent/.config/git/config' \
+  'test ! -r /etc/ssh/ssh_host_ed25519_key && test -r /opt/agent-secrets/gh_token && test ! -w /opt/agent-secrets/gh_token && test -w /home/agent/.codex/auth.json && test -w /home/agent/.claude/.credentials.json && test -w /home/agent/.ssh/authorized_keys && test -w /home/agent/.ssh/known_hosts && test -w /home/agent/.config/git/config' \
   || fail 'Agent cannot access secrets with expected permissions.'
 pass 'Agent cannot read SSH server private key or write GitHub PAT'
 docker compose exec -T --user agent workspace bash -c \
@@ -36,10 +38,10 @@ docker compose exec -T --user agent workspace bash -c \
   || fail 'Git identity not configured inside container.'
 pass 'Git user identity configured and accessible to agent'
 
-for bin in zsh nvim tmux starship fastfetch eza codex agy gh docker; do
+for bin in zsh nvim tmux starship fastfetch eza codex agy claude gh docker; do
   docker compose exec -T --user agent workspace bash -c "PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin command -v '$bin' >/dev/null" || fail "$bin is missing"
 done
-pass 'Zsh, Neovim, tmux, Starship, Fastfetch, Eza, Codex, AGY, GitHub CLI and Docker installed'
+pass 'Zsh, Neovim, tmux, Starship, Fastfetch, Eza, Codex, AGY, Claude Code, GitHub CLI and Docker installed'
 docker compose exec -T --user agent workspace bash -c 'test -f ~/.tmux.conf && grep -q "mouse on" ~/.tmux.conf' || fail 'tmux.conf missing or invalid'
 pass 'Tmux configuration present and valid'
 docker compose exec -T --user agent workspace bash -c 'test -f ~/.config/nvim/init.lua' || fail 'nvim configuration missing'

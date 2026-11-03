@@ -32,11 +32,12 @@ class ProjectContractTests(unittest.TestCase):
                 "./persistent/ssh/authorized_keys:/home/agent/.ssh/authorized_keys:rw",
                 "./persistent/ssh/known_hosts:/home/agent/.ssh/known_hosts:rw",
                 "./persistent/codex/auth.json:/home/agent/.codex/auth.json:rw",
+                "./persistent/claude/.credentials.json:/home/agent/.claude/.credentials.json:rw",
                 "./persistent/gh/token:/opt/agent-secrets/gh_token:ro",
                 "./persistent/git:/home/agent/.config/git:rw",
             },
         )
-        self.assertEqual(len(self.s["volumes"]), 7)
+        self.assertEqual(len(self.s["volumes"]), 8)
 
     def test_network(self):
         self.assertTrue(self.c["networks"]["sandbox"]["external"])
@@ -62,9 +63,11 @@ class ProjectContractTests(unittest.TestCase):
             "debian:trixie-slim", "gh gnupg", "starship", "fastfetch", "eza",
             "docker-cli docker-compose docker-buildx socat", "DOCKER_HOST=tcp://dind:2375",
             "zsh-autosuggestions", "zsh-syntax-highlighting", "openssh-server",
-            "npm install --global", "@openai/codex", "antigravity.google/cli/install.sh",
+            "npm install --global", "@openai/codex", "@anthropic-ai/claude-code", "antigravity.google/cli/install.sh",
             "config/tmux.conf",
             "config/nvim",
+            "config/claude",
+            "config/gemini",
             "gh-wrapper.sh", "credential.https://github.com.helper", "useradd --create-home",
             ".config/git",
         ):
@@ -87,13 +90,19 @@ class ProjectContractTests(unittest.TestCase):
         self.assertTrue((ROOT / "config/nvim/lua/plugins.lua").is_file())
         self.assertTrue((ROOT / "config/nvim/lua/mappings.lua").is_file())
         self.assertTrue((ROOT / "config/nvim/lua/options.lua").is_file())
+        self.assertTrue((ROOT / "config/claude/settings.json").is_file())
+        self.assertTrue((ROOT / "config/claude/statusline.sh").is_file())
+        self.assertTrue((ROOT / "config/claude/CLAUDE.md").is_file())
+        self.assertTrue((ROOT / "config/gemini/settings.json").is_file())
+        self.assertTrue((ROOT / "config/gemini/themes/catppuccin-mocha.json").is_file())
 
     def test_setup_persists_only_explicit_files(self):
         setup = (ROOT / "scripts/setup.sh").read_text()
         for v in (
             "ssh-keygen -y", "ssh/host_keys/", "/etc/ssh/ssh_host_ed25519_key",
             "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
-            "persistent/codex/auth.json", "persistent/gh/token", "persistent/git",
+            "persistent/codex/auth.json", "persistent/claude/.credentials.json",
+            "persistent/gh/token", "persistent/git",
             "chown 10001:10001", "chmod 0400",
         ):
             self.assertIn(v, setup)
@@ -110,7 +119,8 @@ class ProjectContractTests(unittest.TestCase):
             "docker compose down --remove-orphans --volumes",
             "firewall.sh remove", "persistent/ssh/ssh_host_ed25519_key",
             "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
-            "persistent/codex/auth.json", "persistent/gh/token", "persistent/git/config",
+            "persistent/codex/auth.json", "persistent/claude/.credentials.json",
+            "persistent/gh/token", "persistent/git/config",
             "ssh/authorized_keys .env",
         ):
             self.assertIn(v, d)

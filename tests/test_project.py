@@ -64,6 +64,7 @@ class ProjectContractTests(unittest.TestCase):
             "zsh-autosuggestions", "zsh-syntax-highlighting", "openssh-server",
             "npm install --global", "@openai/codex", "antigravity.google/cli/install.sh",
             "config/tmux.conf",
+            "config/nvim",
             "gh-wrapper.sh", "credential.https://github.com.helper", "useradd --create-home",
             ".config/git",
         ):
@@ -82,6 +83,10 @@ class ProjectContractTests(unittest.TestCase):
         tmux = (ROOT / "config/tmux.conf").read_text()
         self.assertIn("mouse on", tmux)
         self.assertIn("history-limit 100000", tmux)
+        self.assertTrue((ROOT / "config/nvim/init.lua").is_file())
+        self.assertTrue((ROOT / "config/nvim/lua/plugins.lua").is_file())
+        self.assertTrue((ROOT / "config/nvim/lua/mappings.lua").is_file())
+        self.assertTrue((ROOT / "config/nvim/lua/options.lua").is_file())
 
     def test_setup_persists_only_explicit_files(self):
         setup = (ROOT / "scripts/setup.sh").read_text()

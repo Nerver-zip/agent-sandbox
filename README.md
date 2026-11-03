@@ -40,7 +40,8 @@ agent-sandbox/
 │   ├── agent.zshrc                # Shell configuration and alias definitions
 │   ├── starship.toml              # Prompt layout and theme
 │   ├── codex.toml                 # Codex CLI file credential storage settings
-│   └── tmux.conf                  # Scrollback buffer and mouse configuration
+│   ├── tmux.conf                  # Scrollback buffer and mouse configuration
+│   └── nvim/                      # Minimal Neovim setup (Catppuccin, Telescope, Nvim-Tree)
 ├── scripts/
 │   ├── setup.sh                   # SSH key generation, migration, and credential setup
 │   ├── up.sh                      # Firewall verification, image build, and container startup
@@ -147,6 +148,13 @@ agy
 ```
 
 Interactive sessions open in Zsh. Common aliases include `ls` for Eza and `v` for Neovim.
+
+Neovim includes a minimal setup with essential plugins:
+- Theme: Catppuccin Mocha (matching Starship and the terminal palette)
+- File explorer: `nvim-tree` (toggle with `<C-n>`, focus with `<leader>e`)
+- Fuzzy finder: `telescope` (find files with `<leader>ff`, grep with `<leader>fw`, buffers with `<leader>fb`)
+- Syntax and status: Treesitter, Lualine, and Gitsigns
+- Keymaps: `jk` and `kj` to exit insert mode, `;` for command mode, and `<C-h/j/k/l>` for split navigation
 
 You can install packages into `~/.local/bin` or an npm user prefix during a session, but these files disappear when the container is recreated. To add temporary packages to a running container, execute the helper script on the host:
 

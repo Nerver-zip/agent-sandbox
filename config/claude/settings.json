@@ -2,7 +2,8 @@
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "haiku",
     "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "5",
-    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+    "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "3"
   },
   "permissions": {
     "defaultMode": "acceptEdits"

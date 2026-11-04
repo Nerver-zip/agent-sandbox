@@ -92,6 +92,7 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("]99;i=1", notify)
         self.assertIn("Ptmux;", notify)
         self.assertIn("agent-notify claude", (ROOT / "config/claude/settings.json").read_text())
+        self.assertIn("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", (ROOT / "config/claude/settings.json").read_text())
         self.assertIn("agent-notify", (ROOT / "config/codex.toml").read_text())
         self.assertIn("agent-notify agy", (ROOT / "config/gemini/config/hooks.json").read_text())
         self.assertTrue((ROOT / "config/nvim/init.lua").is_file())

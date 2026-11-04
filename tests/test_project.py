@@ -86,6 +86,7 @@ class ProjectContractTests(unittest.TestCase):
         tmux = (ROOT / "config/tmux.conf").read_text()
         self.assertIn("mouse on", tmux)
         self.assertIn("history-limit 100000", tmux)
+        self.assertIn("focus-events on", tmux)
         self.assertTrue((ROOT / "config/nvim/init.lua").is_file())
         self.assertTrue((ROOT / "config/nvim/lua/plugins.lua").is_file())
         self.assertTrue((ROOT / "config/nvim/lua/mappings.lua").is_file())

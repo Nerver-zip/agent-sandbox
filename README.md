@@ -40,7 +40,7 @@ agent-sandbox/
 │   ├── agent.zshrc                # Shell configuration and alias definitions
 │   ├── starship.toml              # Prompt layout and theme
 │   ├── codex.toml                 # Codex CLI settings (reasoning, TUI statusline, subagents)
-│   ├── tmux.conf                  # Scrollback buffer and mouse configuration
+│   ├── tmux.conf                  # Scrollback buffer, mouse, focus events, and reload shortcut
 │   ├── nvim/                      # Minimal Neovim setup (Catppuccin, Telescope, Nvim-Tree)
 │   ├── claude/                    # Claude Code configuration, preferences, and statusline
 │   └── gemini/                    # Antigravity CLI preferences and Catppuccin theme

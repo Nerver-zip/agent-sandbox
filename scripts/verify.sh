@@ -42,7 +42,7 @@ for bin in zsh nvim tmux starship fastfetch eza codex agy claude gh docker; do
   docker compose exec -T --user agent workspace bash -c "PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin command -v '$bin' >/dev/null" || fail "$bin is missing"
 done
 pass 'Zsh, Neovim, tmux, Starship, Fastfetch, Eza, Codex, AGY, Claude Code, GitHub CLI and Docker installed'
-docker compose exec -T --user agent workspace bash -c 'test -f ~/.tmux.conf && grep -q "mouse on" ~/.tmux.conf' || fail 'tmux.conf missing or invalid'
+docker compose exec -T --user agent workspace bash -c 'test -f ~/.tmux.conf && grep -q "mouse on" ~/.tmux.conf && grep -q "focus-events on" ~/.tmux.conf' || fail 'tmux.conf missing or invalid'
 pass 'Tmux configuration present and valid'
 docker compose exec -T --user agent workspace bash -c 'test -f ~/.config/nvim/init.lua' || fail 'nvim configuration missing'
 pass 'Neovim configuration present'

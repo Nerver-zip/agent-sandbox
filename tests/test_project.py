@@ -89,7 +89,7 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("focus-events on", tmux)
         self.assertIn("allow-passthrough on", tmux)
         notify = (ROOT / "scripts/agent-notify.sh").read_text()
-        self.assertIn("]777;notify", notify)
+        self.assertIn("]99;i=1", notify)
         self.assertIn("Ptmux;", notify)
         self.assertIn("agent-notify claude", (ROOT / "config/claude/settings.json").read_text())
         self.assertIn("agent-notify", (ROOT / "config/codex.toml").read_text())

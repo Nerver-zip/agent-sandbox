@@ -9,8 +9,8 @@
 # Always exits 0 and never writes to stdout, so it cannot break hook contracts.
 #
 # AGENT_NOTIFY_OSC selects the protocol understood by the client terminal:
-#   777 (default; foot, Ghostty, WezTerm, Konsole), 9 (iTerm2, WezTerm, Windows
-#   Terminal), 99 (kitty), off (BEL and tmux message only).
+#   99 (default; kitty), 777 (foot, Ghostty, WezTerm, Konsole), 9 (iTerm2,
+#   WezTerm, Windows Terminal), off (BEL and tmux message only).
 
 provider="${1:-agent}"; shift
 payload=""
@@ -78,7 +78,7 @@ emit() {
   fi
 }
 
-case "${AGENT_NOTIFY_OSC:-777}" in
+case "${AGENT_NOTIFY_OSC:-99}" in
   777) emit "$(printf '\033]777;notify;%s;%s\007' "$title" "$body")" ;;
   9)   emit "$(printf '\033]9;%s: %s\007' "$title" "$body")" ;;
   99)  emit "$(printf '\033]99;i=1:d=0;%s\033\\\033]99;i=1:p=body;%s\033\\' "$title" "$body")" ;;

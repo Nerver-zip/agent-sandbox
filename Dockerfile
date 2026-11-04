@@ -68,6 +68,7 @@ COPY --chmod=0644 sshd_config /etc/ssh/sshd_config
 COPY --chmod=0755 scripts/container-entrypoint.sh /usr/local/sbin/agent-entrypoint
 # gh wrapper loads the fine-grained token only for gh processes, not the entire shell.
 COPY --chmod=0755 scripts/gh-wrapper.sh /usr/local/bin/gh
+COPY --chmod=0755 scripts/agent-notify.sh /usr/local/bin/agent-notify
 # All HTTPS Git operations on github.com use the same scoped gh token when present.
 RUN git config --system credential.https://github.com.helper '!/usr/local/bin/gh auth git-credential'
 

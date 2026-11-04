@@ -1,0 +1,11 @@
+{
+  "agent-notify": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "agent-notify agy",
+        "timeout": 10
+      }
+    ]
+  }
+}

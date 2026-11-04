@@ -12,3 +12,4 @@ scripts/*
 !scripts/container-entrypoint.sh
 !scripts/gh-wrapper.sh
 !scripts/firewall.sh
+!scripts/agent-notify.sh

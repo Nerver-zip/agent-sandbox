@@ -34,5 +34,18 @@
   "autoMemoryEnabled": true,
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark-ansi",
-  "editorMode": "vim"
+  "editorMode": "vim",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-notify claude",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
 }

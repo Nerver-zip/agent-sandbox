@@ -87,6 +87,13 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("mouse on", tmux)
         self.assertIn("history-limit 100000", tmux)
         self.assertIn("focus-events on", tmux)
+        self.assertIn("allow-passthrough on", tmux)
+        notify = (ROOT / "scripts/agent-notify.sh").read_text()
+        self.assertIn("]777;notify", notify)
+        self.assertIn("Ptmux;", notify)
+        self.assertIn("agent-notify claude", (ROOT / "config/claude/settings.json").read_text())
+        self.assertIn("agent-notify", (ROOT / "config/codex.toml").read_text())
+        self.assertIn("agent-notify agy", (ROOT / "config/gemini/config/hooks.json").read_text())
         self.assertTrue((ROOT / "config/nvim/init.lua").is_file())
         self.assertTrue((ROOT / "config/nvim/lua/plugins.lua").is_file())
         self.assertTrue((ROOT / "config/nvim/lua/mappings.lua").is_file())
@@ -140,6 +147,7 @@ class ProjectContractTests(unittest.TestCase):
         di = (ROOT / '.dockerignore').read_text()
         self.assertIn('!scripts/container-entrypoint.sh', di)
         self.assertIn('!scripts/gh-wrapper.sh', di)
+        self.assertIn('!scripts/agent-notify.sh', di)
 
     def test_entrypoint_docker_sock_proxy(self):
         entrypoint = (ROOT / "scripts/container-entrypoint.sh").read_text()

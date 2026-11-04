@@ -2,6 +2,9 @@
 # Config, history, sessions, caches, and workspace are baked/ephemeral.
 cli_auth_credentials_store = "file"
 
+# Desktop notification on the SSH client when a turn ends.
+notify = ["agent-notify", "codex"]
+
 model = "gpt-6-luna"
 model_reasoning_effort = "max"
 service_tier = "default"

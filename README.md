@@ -40,7 +40,7 @@ agent-sandbox/
 │   ├── agent.zshrc                # Shell configuration and alias definitions
 │   ├── starship.toml              # Prompt layout and theme
 │   ├── codex.toml                 # Codex CLI settings (reasoning, TUI statusline, subagents)
-│   ├── tmux.conf                  # Scrollback buffer, mouse, focus events, and reload shortcut
+│   ├── tmux.conf                  # Scrollback, mouse, focus events, passthrough, bell, and reload shortcut
 │   ├── nvim/                      # Minimal Neovim setup (Catppuccin, Telescope, Nvim-Tree)
 │   ├── claude/                    # Claude Code configuration, preferences, and statusline
 │   └── gemini/                    # Antigravity CLI preferences and Catppuccin theme
@@ -51,6 +51,7 @@ agent-sandbox/
 │   ├── firewall.sh                # Host iptables bridge isolation rules
 │   ├── verify.sh                  # Configuration and health checks
 │   ├── gh-wrapper.sh              # Scoped credential loader for the gh command
+│   ├── agent-notify.sh            # Installed as agent-notify: end-of-turn alerts to the SSH client
 │   ├── set-gh-token.sh            # Prompt for storing a GitHub PAT
 │   ├── reset-gh-token.sh          # Script to remove the stored GitHub PAT
 │   ├── import-codex-auth.sh       # Script to import existing Codex credentials
@@ -354,3 +355,12 @@ Containers share the host kernel. For untrusted code execution requiring strong 
 - [Starship](https://starship.rs/)
 - [Oh My Zsh](https://ohmyz.sh/)
 - [Fastfetch](https://github.com/fastfetch-cli/fastfetch)
+
+## Client notifications
+
+Claude Code, Codex, and Antigravity call `agent-notify` when a turn ends. The container has no display, so the script emits an OSC 777 escape sequence (wrapped in tmux DCS passthrough when inside tmux) that your SSH client terminal turns into a native desktop notification. It also rings the bell so tmux flags the window.
+
+- Works over SSH with or without tmux, as long as the client terminal supports the protocol (foot, Ghostty, WezTerm, Konsole for 777).
+- Other terminals: set `AGENT_NOTIFY_OSC` to `9` (iTerm2, Windows Terminal), `99` (kitty), or `off`.
+- If your client runs its own tmux, enable `set -g allow-passthrough on` there too.
+- Rebuild the image (`./scripts/up.sh`) to apply; existing agent sessions must be restarted.

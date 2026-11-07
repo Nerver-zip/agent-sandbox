@@ -32,6 +32,7 @@ require("lazy").setup(require("plugins"), {
   ui = { border = "rounded" },
   performance = {
     rtp = {
+      paths = { "/usr/lib/nvim" },
       disabled_plugins = {
         "gzip",
         "tarPlugin",

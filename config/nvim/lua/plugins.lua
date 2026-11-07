@@ -95,30 +95,24 @@ return {
   -- Syntax highlighting (Treesitter)
   {
     "nvim-treesitter/nvim-treesitter",
+    branch = "master",
     build = ":TSUpdate",
     event = { "BufReadPost", "BufNewFile" },
-    cmd = { "TSUpdateSync", "TSUpdate", "TSInstall" },
+    cmd = { "TSUpdateSync", "TSUpdate", "TSInstall", "TSInstallSync" },
     config = function()
       local ok, ts = pcall(require, "nvim-treesitter.configs")
       if ok then
         ts.setup({
-          ensure_installed = {
-            "bash",
-            "c",
-            "cpp",
-            "html",
-            "javascript",
-            "json",
-            "lua",
-            "markdown",
-            "markdown_inline",
-            "python",
-            "typescript",
-            "vim",
-            "vimdoc",
-            "yaml",
+          ensure_installed = {},
+          sync_install = false,
+          auto_install = false,
+          highlight = {
+            enable = true,
+            disable = function(lang, buf)
+              local ok_parser, _ = pcall(vim.treesitter.get_parser, buf, lang)
+              return not ok_parser
+            end,
           },
-          highlight = { enable = true },
           indent = { enable = true },
         })
       end
@@ -142,6 +136,7 @@ return {
   -- Git status signs
   {
     "lewis6991/gitsigns.nvim",
+    version = "v2.1.0",
     event = { "BufReadPre", "BufNewFile" },
     config = function()
       require("gitsigns").setup()

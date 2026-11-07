@@ -63,7 +63,7 @@ RUN chmod 0755 /home/agent/.claude/statusline.sh 2>/dev/null || true
 COPY --chown=agent:agent config/gemini /home/agent/.gemini
 COPY --chown=agent:agent --chmod=0644 config/tmux.conf /home/agent/.tmux.conf
 COPY --chown=agent:agent config/nvim /home/agent/.config/nvim
-RUN su -s /bin/bash agent -c 'nvim --headless -c "lua require(\"lazy\").sync({ wait = true })" -c "qa"' 2>/dev/null || true
+RUN su -s /bin/bash agent -c 'nvim --headless -c "Lazy! restore" -c "TSInstallSync! bash python json yaml javascript typescript" -c "qa"' 2>/dev/null || true
 COPY --chmod=0644 sshd_config /etc/ssh/sshd_config
 COPY --chmod=0755 scripts/container-entrypoint.sh /usr/local/sbin/agent-entrypoint
 # gh wrapper loads the fine-grained token only for gh processes, not the entire shell.

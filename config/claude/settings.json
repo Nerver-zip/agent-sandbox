@@ -8,10 +8,23 @@
   "permissions": {
     "defaultMode": "acceptEdits"
   },
-  "model": "opus",
+  "model": "sonnet",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/agent-notify claude",
+            "async": true
+          }
+        ]
+      }
+    ]
+  },
   "statusLine": {
     "type": "command",
-    "command": "/home/agent/.claude/statusline.sh"
+    "command": "~/.claude/statusline.sh"
   },
   "modelSettings": {
     "claude-haiku-5-5": {
@@ -36,17 +49,5 @@
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark-ansi",
   "editorMode": "vim",
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "agent-notify claude",
-            "async": true
-          }
-        ]
-      }
-    ]
-  }
+  "preferredNotifChannel": "notifications_disabled"
 }

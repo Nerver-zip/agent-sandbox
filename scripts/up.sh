@@ -3,6 +3,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME=agent-sandbox
 fail() { echo "ERROR: $*" >&2; exit 1; }
+REBUILD=0
+for arg in "$@"; do
+  case "$arg" in
+    --rebuild|-r)
+      REBUILD=1
+      ;;
+    *)
+      fail "Unknown option: $arg. Usage: $0 [--rebuild]"
+      ;;
+  esac
+done
 [[ -s .env && -s ssh/authorized_keys ]] || fail 'Run scripts/setup.sh first.'
 [[ -s persistent/ssh/ssh_host_ed25519_key && -s persistent/ssh/ssh_host_ed25519_key.pub ]] || fail 'Host keys missing. Run setup.'
 [[ -s persistent/ssh/authorized_keys ]] || fail 'Persistent authorized_keys missing. Run setup.'
@@ -53,7 +64,20 @@ else
   sudo ./scripts/firewall.sh check
 fi
 docker compose config --quiet
-docker compose up --build -d --remove-orphans
+EXISTING_WS=$(docker compose ps -a -q workspace 2>/dev/null || true)
+EXISTING_DIND=$(docker compose ps -a -q dind 2>/dev/null || true)
+if [[ $REBUILD -eq 1 || -z "$EXISTING_WS" || -z "$EXISTING_DIND" ]]; then
+  docker compose up --build -d --force-recreate --remove-orphans
+else
+  RUNNING_WS=$(docker compose ps -q workspace 2>/dev/null || true)
+  RUNNING_DIND=$(docker compose ps -q dind 2>/dev/null || true)
+  if [[ -n "$RUNNING_WS" && -n "$RUNNING_DIND" ]]; then
+    echo 'Agent Sandbox containers are already running (workspace preserved).'
+  else
+    echo 'Starting existing Agent Sandbox containers (preserving workspace)...'
+    docker compose start
+  fi
+fi
 PORT=$(sed -n 's/^AGENT_SSH_PORT=//p' .env | tail -n 1)
 printf '\nAgent Sandbox ready: ssh -p %s agent@%s\n' "${PORT:-2222}" "$TS_CURRENT"
 echo 'Container filesystem is disposable. SSH host identity, Codex auth, Claude credentials, Git config and GitHub PAT persist.'

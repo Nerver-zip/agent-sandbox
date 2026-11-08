@@ -170,7 +170,7 @@ You can install packages into `~/.local/bin` or an npm user prefix during a sess
 ./scripts/install-packages.sh clang-format lldb
 ```
 
-To add dependencies permanently, edit `Dockerfile` and rebuild with `./scripts/up.sh`. The `agent` account inside the container has no sudo permissions.
+To add dependencies permanently, edit `Dockerfile` and rebuild with `./scripts/up.sh --rebuild`. The `agent` account inside the container has no sudo permissions.
 
 ### Codex authentication
 
@@ -275,7 +275,7 @@ Leave the existing container running while you run `setup.sh` so the script can 
 1. Unpack updated files into a temporary directory, then copy source files (`Dockerfile`, `compose.yaml`, `scripts/`, `config/`, `docs/`, `tests/`, `sshd_config`, `README.md`) into your installation folder. Preserve existing `.env`, `ssh/authorized_keys`, and `persistent/` directories.
 2. Run `./scripts/setup.sh`. The script reuses persistent host keys, imports existing keys from previous directory layouts, or pulls them from the running container. It also preserves existing Codex credentials.
 3. Update the GitHub token if needed with `./scripts/set-gh-token.sh`.
-4. Rebuild and restart with `./scripts/up.sh`, then run `./scripts/verify.sh`.
+4. Rebuild and restart with `./scripts/up.sh --rebuild`, then run `./scripts/verify.sh`.
 
 Push or back up workspace changes before updating, as recreating the container resets its writable filesystem.
 
@@ -283,10 +283,10 @@ Push or back up workspace changes before updating, as recreating the container r
 
 | Operation | Workspace files | Server host key | Client authorized keys | Codex credentials | Claude credentials | GitHub PAT | Git config |
 |---|---|---|---|---|---|---|---|
-| `docker compose stop` / `start` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `docker compose stop` → `./scripts/up.sh` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
 | `docker compose restart` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
 | `docker compose down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `./scripts/up.sh` (recreate) | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/up.sh --rebuild` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
 | `./scripts/destroy.sh` | Cleared | Deleted | Deleted | Deleted | Deleted | Deleted | Deleted |
 
 Only files in `persistent/` are mounted into the container. Host project folders, other container volumes, and host sockets remain unmapped.
@@ -294,13 +294,15 @@ Only files in `persistent/` are mounted into the container. Host project folders
 Standard management commands:
 
 ```bash
-# Pause and resume without resetting container data
+# Pause and resume without resetting container data (restores firewall on resume)
 docker compose stop
-docker compose start
+./scripts/up.sh
 
 # Reset the container filesystem while preserving credentials and SSH keys
 docker compose down
 ./scripts/up.sh
+# Or in a single command:
+./scripts/up.sh --rebuild
 
 # Remove the sandbox, credentials, firewall rules, and generated state
 ./scripts/destroy.sh
@@ -363,4 +365,4 @@ Claude Code, Codex, and Antigravity call `agent-notify` when a turn ends. The co
 - Works over SSH with or without tmux, as long as the client terminal supports the protocol (kitty by default).
 - Other terminals: set `AGENT_NOTIFY_OSC` to `777` (foot, Ghostty, WezTerm, Konsole), `9` (iTerm2, Windows Terminal), or `off`.
 - If your client runs its own tmux, enable `set -g allow-passthrough on` there too.
-- Rebuild the image (`./scripts/up.sh`) to apply; existing agent sessions must be restarted.
+- Rebuild the image (`./scripts/up.sh --rebuild`) to apply; existing agent sessions must be restarted.

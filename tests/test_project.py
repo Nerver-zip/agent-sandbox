@@ -158,5 +158,16 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("socat UNIX-LISTEN:/var/run/docker.sock", entrypoint)
         self.assertIn("TCP:dind:2375", entrypoint)
 
+    def test_up_preserves_existing_containers_unless_rebuild(self):
+        up = (ROOT / "scripts/up.sh").read_text()
+        for v in (
+            "--rebuild|-r",
+            "firewall.sh install",
+            "docker compose ps -a -q workspace",
+            "docker compose start",
+            "docker compose up --build -d --force-recreate --remove-orphans",
+        ):
+            self.assertIn(v, up)
+
 if __name__ == "__main__":
     unittest.main()

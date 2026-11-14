@@ -179,6 +179,15 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("regular empty file:10001:600", (ROOT / "scripts/verify.sh").read_text())
         self.assertIn("auth-operation", (ROOT / "scripts/codex-wrapper.sh").read_text())
 
+    def test_setup_offers_interactive_credential_import(self):
+        helper = ROOT / "scripts/import-credentials.sh"
+        self.assertTrue(helper.stat().st_mode & 0o111)
+        text = helper.read_text()
+        for v in ("import-codex-auth.sh", "import-claude-auth.sh", "set-gh-token.sh", "scp -q", "grep -qx '{}'"):
+            self.assertIn(v, text)
+        self.assertIn("import-credentials.sh", (ROOT / "scripts/setup.sh").read_text())
+        self.assertIn("import-credentials.sh", (ROOT / "scripts/up.sh").read_text())
+
     def test_up_preserves_existing_containers_unless_rebuild(self):
         up = (ROOT / "scripts/up.sh").read_text()
         for v in (

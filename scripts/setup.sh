@@ -315,6 +315,12 @@ DIND_CPUS=2.0
 CONF
 fi
 chmod 0600 .env
+
+# Offer to import existing Codex/Claude logins and a GitHub PAT (interactive terminals only).
+if [[ -t 0 && -t 1 && -z "${ASBX_SKIP_IMPORT:-}" ]]; then
+  echo
+  ./scripts/import-credentials.sh || echo 'Credential import skipped; run ./scripts/import-credentials.sh later.'
+fi
 printf '\nSetup complete. Tailscale host IP: %s\n' "$TS_IP"
 echo 'Run ./scripts/up.sh to deploy.'
 echo 'SSH host identity, Codex auth, Claude credentials, Git config and optional GitHub PAT persist across docker compose down.'

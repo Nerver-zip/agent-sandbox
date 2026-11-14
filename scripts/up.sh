@@ -99,6 +99,14 @@ else
     docker compose start
   fi
 fi
+# Non-blocking reminder when a login is still the empty placeholder.
+for pair in 'Codex:persistent/codex/auth.json' 'Claude Code:persistent/claude/.credentials.json'; do
+  if [[ $EUID -eq 0 ]]; then
+    grep -qx '{}' "${pair#*:}" 2>/dev/null && echo "Note: ${pair%%:*} is not logged in. Run ./scripts/import-credentials.sh (container stopped) or log in inside the sandbox." || true
+  else
+    sudo grep -qx '{}' "${pair#*:}" 2>/dev/null && echo "Note: ${pair%%:*} is not logged in. Run ./scripts/import-credentials.sh (container stopped) or log in inside the sandbox." || true
+  fi
+done
 PORT=$(sed -n 's/^AGENT_SSH_PORT=//p' .env | tail -n 1)
 printf '\nAgent Sandbox ready: ssh -p %s agent@%s\n' "${PORT:-2222}" "$TS_CURRENT"
 echo 'Container filesystem is disposable. SSH host identity, Codex auth, Claude credentials, Git config and GitHub PAT persist.'

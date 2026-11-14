@@ -111,7 +111,7 @@ run_priv "test -f \"$AUTH_LOCK\" && test ! -L \"$AUTH_LOCK\"" || fail 'Codex aut
 run_priv "chown 10001:10001 \"$AUTH_LOCK\" && chmod 0600 \"$AUTH_LOCK\""
 if run_priv "test -e \"$AUTH_OPERATION\" || test -L \"$AUTH_OPERATION\""; then
   AUTH_OPERATION_STATE=$(run_priv "stat -c '%F:%u:%a' \"$AUTH_OPERATION\"")
-  [[ "$AUTH_OPERATION_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth operation marker must be a regular UID 10001 file, mode 0600.'
+  [[ "$AUTH_OPERATION_STATE" == 'regular file:10001:600' || "$AUTH_OPERATION_STATE" == 'regular empty file:10001:600' ]] || fail 'Codex auth operation marker must be a regular UID 10001 file, mode 0600.'
 fi
 
 # Mounting this directory exposes every entry, so reject unexpected host files.

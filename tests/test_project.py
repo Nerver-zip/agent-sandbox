@@ -174,6 +174,8 @@ class ProjectContractTests(unittest.TestCase):
         self.assertNotIn("persistent/codex/auth.json:/home/agent/.codex/auth.json", str(self.s["volumes"]))
         self.assertIn("CODEX_DIR", (ROOT / "scripts/setup.sh").read_text())
         self.assertIn("auth.lock", (ROOT / "scripts/verify.sh").read_text())
+        self.assertIn("regular empty file:10001:600", (ROOT / "scripts/up.sh").read_text())
+        self.assertIn("regular empty file:10001:600", (ROOT / "scripts/verify.sh").read_text())
         self.assertIn("auth-operation", (ROOT / "scripts/codex-wrapper.sh").read_text())
 
     def test_up_preserves_existing_containers_unless_rebuild(self):

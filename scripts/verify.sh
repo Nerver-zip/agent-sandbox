@@ -31,8 +31,8 @@ else
   CODEX_ENTRIES=$(sudo find persistent/codex -mindepth 1 -maxdepth 1 -printf '%f\n')
 fi
 [[ "$CODEX_AUTH_STATE" == 'regular file:10001:600:1' ]] || fail 'Codex auth file must be regular, UID 10001, mode 0600, without hard links'
-[[ "$CODEX_LOCK_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth lock must be regular, UID 10001, mode 0600'
-[[ -z "$CODEX_OPERATION_STATE" || "$CODEX_OPERATION_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth operation marker has unsafe type, ownership, or permissions'
+[[ "$CODEX_LOCK_STATE" == 'regular file:10001:600' || "$CODEX_LOCK_STATE" == 'regular empty file:10001:600' ]] || fail 'Codex auth lock must be regular, UID 10001, mode 0600'
+[[ -z "$CODEX_OPERATION_STATE" || "$CODEX_OPERATION_STATE" == 'regular file:10001:600' || "$CODEX_OPERATION_STATE" == 'regular empty file:10001:600' ]] || fail 'Codex auth operation marker has unsafe type, ownership, or permissions'
 while IFS= read -r entry; do
   case "$entry" in
     auth.json|auth.lock|auth-operation|.auth-*) ;;

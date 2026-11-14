@@ -10,6 +10,7 @@ ssh/*
 !ssh/authorized_keys
 scripts/*
 !scripts/container-entrypoint.sh
+!scripts/codex-wrapper.sh
 !scripts/gh-wrapper.sh
 !scripts/firewall.sh
 !scripts/agent-notify.sh

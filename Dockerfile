@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && groupadd -r docker \
     && useradd --create-home --uid 10001 --shell /usr/bin/zsh -G docker agent \
     && passwd -d agent \
-    && install -d -m 0700 -o agent -g agent /home/agent/.ssh /home/agent/.codex /home/agent/.claude /home/agent/.gemini \
+    && install -d -m 0700 -o agent -g agent /home/agent/.ssh /home/agent/.codex /home/agent/.codex-auth /home/agent/.claude /home/agent/.gemini \
     && install -d -m 0755 /run/sshd \
     && rm -f /etc/ssh/ssh_host_*key* \
     && mkdir -p /home/agent/workspace /home/agent/.config/starship /home/agent/.config/git /opt/agent-secrets \
@@ -39,6 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install --global "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
     && command -v codex && codex --version \
     && command -v claude && claude --version \
+    && CODEX_BIN="$(command -v codex)" \
+    && CODEX_REAL_BIN="${CODEX_BIN}-cli" \
+    && mv "$CODEX_BIN" "$CODEX_REAL_BIN" \
+    && if [ "$CODEX_REAL_BIN" != /usr/local/bin/codex-cli ]; then ln -s "$CODEX_REAL_BIN" /usr/local/bin/codex-cli; fi \
     && chown -R agent:agent /home/agent/.codex /home/agent/.claude
 
 # Remote Oh My Zsh source (track updates explicitly by rebuilding).
@@ -66,6 +70,7 @@ COPY --chown=agent:agent config/nvim /home/agent/.config/nvim
 RUN su -s /bin/bash agent -c 'nvim --headless -c "Lazy! restore" -c "TSInstallSync! bash python json yaml javascript typescript" -c "qa"' 2>/dev/null || true
 COPY --chmod=0644 sshd_config /etc/ssh/sshd_config
 COPY --chmod=0755 scripts/container-entrypoint.sh /usr/local/sbin/agent-entrypoint
+COPY --chmod=0755 scripts/codex-wrapper.sh /usr/local/bin/codex
 # gh wrapper loads the fine-grained token only for gh processes, not the entire shell.
 COPY --chmod=0755 scripts/gh-wrapper.sh /usr/local/bin/gh
 COPY --chmod=0755 scripts/agent-notify.sh /usr/local/bin/agent-notify

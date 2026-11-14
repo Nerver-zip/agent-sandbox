@@ -18,11 +18,32 @@ done
 [[ -s persistent/ssh/ssh_host_ed25519_key && -s persistent/ssh/ssh_host_ed25519_key.pub ]] || fail 'Host keys missing. Run setup.'
 [[ -s persistent/ssh/authorized_keys ]] || fail 'Persistent authorized_keys missing. Run setup.'
 [[ -f persistent/ssh/known_hosts ]] || fail 'SSH known_hosts file missing. Run setup.'
-[[ -f persistent/codex/auth.json ]] || fail 'Codex credentials file missing. Run setup.'
+[[ -d persistent/codex && ! -L persistent/codex ]] || fail 'Codex credential directory missing or unsafe. Run setup.'
 [[ -f persistent/claude/.credentials.json ]] || fail 'Claude credentials file missing. Run setup.'
 [[ -f persistent/gh/token ]] || fail 'GitHub credential file missing. Run setup.'
 [[ $(stat -c '%u:%a' persistent/gh/token) == 10001:400 ]] || fail 'GitHub token must be owned by UID 10001, mode 0400.'
-[[ $(stat -c '%u:%a' persistent/codex/auth.json) == 10001:600 ]] || fail 'Codex auth file must be owned by UID 10001, mode 0600.'
+[[ $(stat -c '%u:%a' persistent/codex) == 10001:700 ]] || fail 'Codex credential directory must be owned by UID 10001, mode 0700.'
+if [[ $EUID -eq 0 ]]; then
+  CODEX_AUTH_STATE=$(stat -c '%F:%u:%a:%h' persistent/codex/auth.json 2>/dev/null || true)
+  CODEX_LOCK_STATE=$(stat -c '%F:%u:%a' persistent/codex/auth.lock 2>/dev/null || true)
+  CODEX_OPERATION_STATE=$(stat -c '%F:%u:%a' persistent/codex/auth-operation 2>/dev/null || true)
+  CODEX_ENTRIES=$(find persistent/codex -mindepth 1 -maxdepth 1 -printf '%f\n')
+else
+  sudo -v || fail 'sudo is required to inspect the protected Codex credential directory.'
+  CODEX_AUTH_STATE=$(sudo stat -c '%F:%u:%a:%h' persistent/codex/auth.json 2>/dev/null || true)
+  CODEX_LOCK_STATE=$(sudo stat -c '%F:%u:%a' persistent/codex/auth.lock 2>/dev/null || true)
+  CODEX_OPERATION_STATE=$(sudo stat -c '%F:%u:%a' persistent/codex/auth-operation 2>/dev/null || true)
+  CODEX_ENTRIES=$(sudo find persistent/codex -mindepth 1 -maxdepth 1 -printf '%f\n')
+fi
+[[ "$CODEX_AUTH_STATE" == 'regular file:10001:600:1' ]] || fail 'Codex auth file must be a regular UID 10001 file, mode 0600, without hard links.'
+[[ "$CODEX_LOCK_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth lock must be a regular UID 10001 file, mode 0600.'
+[[ -z "$CODEX_OPERATION_STATE" || "$CODEX_OPERATION_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth operation marker has unsafe type, ownership, or permissions.'
+while IFS= read -r entry; do
+  case "$entry" in
+    auth.json|auth.lock|auth-operation|.auth-*) ;;
+    *) fail "Unexpected file in the Codex credential directory: $entry" ;;
+  esac
+done <<< "$CODEX_ENTRIES"
 [[ $(stat -c '%u:%a' persistent/claude/.credentials.json) == 10001:600 ]] || fail 'Claude credentials file must be owned by UID 10001, mode 0600.'
 [[ $(stat -c '%u:%a' persistent/ssh/authorized_keys) == 10001:600 ]] || fail 'Persistent authorized_keys must be owned by UID 10001, mode 0600.'
 [[ $(stat -c '%u:%a' persistent/ssh/known_hosts) == 10001:600 ]] || fail 'SSH known_hosts file must be owned by UID 10001, mode 0600.'

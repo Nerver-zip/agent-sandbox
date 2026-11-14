@@ -70,6 +70,7 @@ agent-sandbox/
 │   ├── ssh/authorized_keys        # Allowed client public keys
 │   ├── ssh/known_hosts            # Outbound SSH host verifications
 │   ├── codex/auth.json            # Codex login credentials
+│   ├── codex/auth.lock            # Codex refresh serialization lock
 │   ├── claude/.credentials.json   # Claude Code OAuth credentials
 │   ├── gh/token                   # GitHub personal access token
 │   └── git/config                 # Git user configuration (name and email)
@@ -174,7 +175,9 @@ To add dependencies permanently, edit `Dockerfile` and rebuild with `./scripts/u
 
 ### Codex authentication
 
-Codex stores login data in `/home/agent/.codex/auth.json`. The sandbox mounts this file read-write from `persistent/codex/auth.json` on the host, with ownership set to UID 10001 and permissions to `0600`. The setup script creates an empty JSON object (`{}`) if no file exists. When you run `codex` and sign in, token updates write to this file and persist across container restarts. Other files in `.codex`, such as logs, command caches, and session history, do not persist.
+Codex keeps its normal `CODEX_HOME` at `/home/agent/.codex`. That directory stays in the disposable container layer. The entrypoint links `auth.json` and Codex's `auth.lock` into `/home/agent/.codex-auth`, which is a directory bind-mounted from `persistent/codex` on the host. The host directory is owned by UID 10001 with mode `0700`; `auth.json` and `auth.lock` are owned by UID 10001 with mode `0600`.
+
+This directory mount lets current Codex releases create a private `.auth-*` temporary file, sync it, and atomically rename it over `auth.json`. A file bind mount blocks that rename with `EBUSY`. Codex login and logout also remove the `auth.json` pathname directly, so `/usr/local/bin/codex` is a small wrapper around the installed CLI: it synchronizes a newly created auth file back into the persistent directory, recreates the symlink, and makes logout durable. If a login or logout is interrupted, the entrypoint completes the sign-out before relinking the store. Config, logs, cache, history, sessions, and workspace remain ephemeral.
 
 To import an existing `auth.json` file from another machine:
 
@@ -192,7 +195,21 @@ docker compose stop
 ./scripts/up.sh
 ```
 
-The `auth.json` file is accessible to any command executed by the `agent` user. In-place file updates work with the bind mount, but commands like `codex logout` that attempt to unlink the file directly may fail. Use `reset-codex-auth.sh` to clear local data and revoke sessions through OpenAI if a token is compromised.
+The credential file is accessible to any command executed by the `agent` user. The wrapper handles Codex's unlink-before-login and logout behavior while keeping the persistent file in the mounted directory. Use `reset-codex-auth.sh` when you need to clear local credentials without launching Codex; revoke compromised sessions through OpenAI as well.
+
+To validate the live device-code flow after deploying, run:
+
+```bash
+docker compose exec -it --user agent workspace codex login --device-auth
+docker compose exec -T --user agent workspace codex login status
+docker compose exec -T --user agent workspace sh -lc '
+  test "$CODEX_HOME" = /home/agent/.codex &&
+  test "$(readlink "$CODEX_HOME/auth.json")" = "$CODEX_AUTH_DIR/auth.json" &&
+  stat -c "%u:%a" "$CODEX_AUTH_DIR" "$CODEX_AUTH_DIR/auth.json" "$CODEX_AUTH_DIR/auth.lock"
+'
+```
+
+The command output shows only paths, ownership, and modes; do not print or copy `auth.json`. A successful Codex request exercises the normal refresh path when the service determines a refresh is due. The automated Docker regression uses synthetic credentials and repeated `fsync`/rename operations, so it does not need a real account.
 
 ### Claude Code authentication
 
@@ -270,12 +287,12 @@ The workspace image includes the Docker CLI, Compose v2, and Buildx. The contain
 
 ## Upgrading and migrations
 
-Leave the existing container running while you run `setup.sh` so the script can preserve its SSH server host key and credentials.
+Leave the existing container running while you run `setup.sh` so the script can preserve its SSH server host key and credentials. The Codex migration keeps the existing `persistent/codex/auth.json` file in place and changes the host directory to UID 10001, mode `0700`; it does not replace the auth contents.
 
 1. Unpack updated files into a temporary directory, then copy source files (`Dockerfile`, `compose.yaml`, `scripts/`, `config/`, `docs/`, `tests/`, `sshd_config`, `README.md`) into your installation folder. Preserve existing `.env`, `ssh/authorized_keys`, and `persistent/` directories.
-2. Run `./scripts/setup.sh`. The script reuses persistent host keys, imports existing keys from previous directory layouts, or pulls them from the running container. It also preserves existing Codex credentials.
+2. Run `./scripts/setup.sh`. The script reuses persistent host keys, imports existing keys from previous directory layouts, or pulls them from the running container. It preserves the existing Codex auth file and prepares the new credential-directory mount.
 3. Update the GitHub token if needed with `./scripts/set-gh-token.sh`.
-4. Rebuild and restart with `./scripts/up.sh --rebuild`, then run `./scripts/verify.sh`.
+4. Back up or commit workspace changes, then recreate the container with `./scripts/up.sh --rebuild` and run `./scripts/verify.sh`. Recreating the container clears workspace files but keeps all configured host-persisted credentials and keys.
 
 Push or back up workspace changes before updating, as recreating the container resets its writable filesystem.
 
@@ -328,7 +345,7 @@ Common issues:
 - SSH connects and disconnects immediately: Check SSHD logs and ensure `AUDIT_WRITE` is included under `cap_add` in `compose.yaml`.
 - Host key warning on reconnect: Verify the fingerprint matches `persistent/ssh/ssh_host_ed25519_key.pub`. Running `destroy.sh` generates a new key.
 - Connection failures over Tailscale: Confirm the Tailscale IP in `.env`, firewall rules on `tailscale0`, and tailnet ACLs for the client device.
-- Credential errors: Check host file permissions with `stat -c '%u:%a' persistent/codex/auth.json persistent/gh/token` (expected: `10001:600` and `10001:400`).
+- Credential errors: Check the Codex store with `docker compose exec --user agent workspace stat -c '%u:%a' /home/agent/.codex-auth /home/agent/.codex-auth/auth.json /home/agent/.codex-auth/auth.lock` (expected: `10001:700`, `10001:600`, and `10001:600`).
 - Missing icons in prompt: Select a Nerd Font in your terminal emulator settings.
 - Build failures: Check outbound network access to npm and the Antigravity installation endpoints.
 

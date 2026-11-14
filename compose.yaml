@@ -17,6 +17,7 @@ services:
     environment:
       HOME: /home/agent
       CODEX_HOME: /home/agent/.codex
+      CODEX_AUTH_DIR: /home/agent/.codex-auth
       STARSHIP_CONFIG: /home/agent/.config/starship/starship.toml
       DOCKER_HOST: tcp://dind:2375
       TZ: America/Sao_Paulo
@@ -31,9 +32,9 @@ services:
       - ./persistent/ssh/known_hosts:/home/agent/.ssh/known_hosts:rw
       # Fine-grained GitHub PAT: read-only inside the agent; never Docker environment.
       - ./persistent/gh/token:/opt/agent-secrets/gh_token:ro
-      # Only Codex auth.json persists. Sessions, logs, cache, config and workspace do not.
-      # Owner UID 10001 on host, file mode 0600. User agent can read/write bearer credentials.
-      - ./persistent/codex/auth.json:/home/agent/.codex/auth.json:rw
+      # Persist only the Codex auth store and atomic-write sidecars; CODEX_HOME stays ephemeral.
+      # Host directory is UID 10001, mode 0700; auth.json and auth.lock are mode 0600.
+      - ./persistent/codex:/home/agent/.codex-auth:rw
       # Claude Code credentials persist across container recreations.
       - ./persistent/claude/.credentials.json:/home/agent/.claude/.credentials.json:rw
       # Git configuration (user.name and user.email) persists across container recreations.

@@ -6,13 +6,34 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 for cmd in docker tailscale ssh-keygen awk; do command -v "$cmd" >/dev/null || fail "Missing command: $cmd"; done
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required.'
 
+run_priv() {
+  local cmd=$1
+  if [[ $EUID -eq 0 ]]; then
+    sh -c "$cmd"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo sh -c "$cmd"
+  elif command -v docker >/dev/null 2>&1 && docker image inspect agent-sandbox:local >/dev/null 2>&1; then
+    docker run --rm -i -v "$PWD:$PWD" -w "$PWD" --entrypoint sh agent-sandbox:local -c "$cmd"
+  else
+    command -v sudo >/dev/null || fail 'sudo or docker is required for privileged setup operations.'
+    sudo sh -c "$cmd"
+  fi
+}
+
 if [[ -n "${1:-}" ]]; then
   [[ -r "$1" ]] || fail "Public key missing: $1 (pass its path as argument)"
 fi
 TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
 [[ "$TS_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Tailscale host IPv4 not detected.'
 
-install -d -m 0700 persistent persistent/ssh persistent/codex persistent/claude persistent/gh ssh
+install -d -m 0700 persistent persistent/ssh persistent/claude persistent/gh ssh
+[[ ! -L persistent/codex ]] || fail 'persistent/codex must be a real directory, not a symlink.'
+[[ ! -e persistent/codex || -d persistent/codex ]] || fail 'persistent/codex exists but is not a directory.'
+run_priv "install -d -m 0700 -o 10001 -g 10001 \"$PWD/persistent/codex\" && chown 10001:10001 \"$PWD/persistent/codex\" && chmod 0700 \"$PWD/persistent/codex\""
+CODEX_DIR="$PWD/persistent/codex"
+AUTH_FILE="$CODEX_DIR/auth.json"
+AUTH_LOCK="$CODEX_DIR/auth.lock"
+AUTH_OPERATION="$CODEX_DIR/auth-operation"
 HOST_KEY="$PWD/persistent/ssh/ssh_host_ed25519_key"
 HOST_PUB="$HOST_KEY.pub"
 if [[ -f "$HOST_KEY" ]]; then
@@ -53,50 +74,54 @@ DERIVED=$(ssh-keygen -y -f "$HOST_KEY" | awk '{print $1, $2}') || fail 'SSH host
 [[ "$EXPECTED" == "$DERIVED" ]] || fail 'SSH server private/public keys do not match.'
 ssh-keygen -lf "$HOST_PUB"
 
-# Persist ONLY the Codex auth file from CODEX_HOME; SSH identity and GH PAT are separate allowlisted files.
-# {} is valid unauthenticated state, unlike an empty (invalid JSON) file.
-AUTH_FILE="$PWD/persistent/codex/auth.json"
-if [[ ! -e "$AUTH_FILE" ]]; then
-  printf '{}\n' > "$AUTH_FILE"
-  # Migrate the CURRENT (running) Codex file, if present. No secret is printed.
+# Persist only Codex's credential document and its atomic-write lock. CODEX_HOME itself
+# remains ephemeral. An absent host file may be migrated from the currently running
+# legacy container; never replace an existing host credential with container state.
+if ! run_priv "test -e \"$AUTH_FILE\" || test -L \"$AUTH_FILE\""; then
   OLD_CID=$(docker ps -q --filter 'label=com.docker.compose.project=agent-sandbox' --filter 'label=com.docker.compose.service=workspace' | head -n 1)
   if [[ -n "$OLD_CID" ]]; then
-    MIGRATED=$(mktemp)
-    if docker exec "$OLD_CID" cat /home/agent/.codex/auth.json > "$MIGRATED" 2>/dev/null && \
-       [[ -s "$MIGRATED" ]] && python3 -m json.tool "$MIGRATED" >/dev/null 2>&1; then
-      cat "$MIGRATED" > "$AUTH_FILE"
-      echo 'Migrated Codex login from running container.'
+    MIGRATED=$(run_priv "mktemp \"$CODEX_DIR/.auth-migrate.XXXXXXXX\"")
+    if docker exec "$OLD_CID" cat /home/agent/.codex/auth.json 2>/dev/null | run_priv "cat > \"$MIGRATED\""; then
+      if run_priv "test -s \"$MIGRATED\" && python3 -m json.tool \"$MIGRATED\" >/dev/null 2>&1"; then
+        run_priv "chown 10001:10001 \"$MIGRATED\" && chmod 0600 \"$MIGRATED\" && mv -f \"$MIGRATED\" \"$AUTH_FILE\""
+        echo 'Migrated Codex login from running container.'
+      else
+        run_priv "rm -f -- \"$MIGRATED\""
+      fi
+    else
+      run_priv "rm -f -- \"$MIGRATED\""
     fi
-    rm -f "$MIGRATED"
   fi
 fi
-[[ -f "$AUTH_FILE" && ! -L "$AUTH_FILE" ]] || fail 'Codex auth must be a regular file, not a symlink.'
-
-run_priv() {
-  local cmd=$1
-  if [[ $EUID -eq 0 ]]; then
-    sh -c "$cmd"
-  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo sh -c "$cmd"
-  elif command -v docker >/dev/null 2>&1 && docker image inspect agent-sandbox:local >/dev/null 2>&1; then
-    docker run --rm -v "$PWD:$PWD" -w "$PWD" --entrypoint sh agent-sandbox:local -c "$cmd"
-  else
-    command -v sudo >/dev/null || fail 'sudo or docker is required for privileged setup operations.'
-    sudo sh -c "$cmd"
-  fi
-}
-
-if [[ -r "$AUTH_FILE" ]]; then
-  python3 -m json.tool "$AUTH_FILE" >/dev/null || fail 'Codex auth file is invalid JSON.'
-else
-  run_priv "python3 -m json.tool \"$AUTH_FILE\" >/dev/null" || fail 'Codex auth file is invalid JSON.'
+if ! run_priv "test -e \"$AUTH_FILE\" || test -L \"$AUTH_FILE\""; then
+  run_priv "set -C; printf '{}\\n' > \"$AUTH_FILE\" && chown 10001:10001 \"$AUTH_FILE\" && chmod 0600 \"$AUTH_FILE\"" || fail 'Could not initialize Codex auth file without overwriting existing data.'
 fi
-# Running container user is UID 10001; keep this secret 0600 and inaccessible to others.
-chmod 0600 "$AUTH_FILE" 2>/dev/null || true
-if [[ "$(stat -c '%u' "$AUTH_FILE")" != 10001 ]]; then
-  run_priv "chown 10001:10001 \"$AUTH_FILE\""
+run_priv "test -f \"$AUTH_FILE\" && test ! -L \"$AUTH_FILE\"" || fail 'Codex auth must be a regular file, not a symlink.'
+AUTH_LINKS=$(run_priv "stat -c '%h' \"$AUTH_FILE\"")
+[[ "$AUTH_LINKS" == 1 ]] || fail 'Codex auth file must not have hard links.'
+run_priv "python3 -m json.tool \"$AUTH_FILE\" >/dev/null" || fail 'Codex auth file is invalid JSON.'
+run_priv "chown 10001:10001 \"$AUTH_FILE\" && chmod 0600 \"$AUTH_FILE\""
+
+# Codex serializes refresh commits using CODEX_HOME/auth.lock. Keep that lock beside
+# the persistent document so processes share it across container restarts.
+if ! run_priv "test -e \"$AUTH_LOCK\" || test -L \"$AUTH_LOCK\""; then
+  run_priv "set -C; : > \"$AUTH_LOCK\" && chown 10001:10001 \"$AUTH_LOCK\" && chmod 0600 \"$AUTH_LOCK\"" || fail 'Could not initialize Codex auth lock file.'
 fi
-[[ "$(stat -c '%a' "$AUTH_FILE")" == 600 ]] || fail 'Codex auth file must have mode 0600.'
+run_priv "test -f \"$AUTH_LOCK\" && test ! -L \"$AUTH_LOCK\"" || fail 'Codex auth lock must be a regular file, not a symlink.'
+run_priv "chown 10001:10001 \"$AUTH_LOCK\" && chmod 0600 \"$AUTH_LOCK\""
+if run_priv "test -e \"$AUTH_OPERATION\" || test -L \"$AUTH_OPERATION\""; then
+  AUTH_OPERATION_STATE=$(run_priv "stat -c '%F:%u:%a' \"$AUTH_OPERATION\"")
+  [[ "$AUTH_OPERATION_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth operation marker must be a regular UID 10001 file, mode 0600.'
+fi
+
+# Mounting this directory exposes every entry, so reject unexpected host files.
+CODEX_ENTRIES=$(run_priv "find \"$CODEX_DIR\" -mindepth 1 -maxdepth 1 -printf '%f\\n'")
+while IFS= read -r entry; do
+  case "$entry" in
+    auth.json|auth.lock|auth-operation|.auth-*) ;;
+    *) fail "Unexpected file in the Codex credential directory: $entry" ;;
+  esac
+done <<< "$CODEX_ENTRIES"
 
 # Persist ONLY the Claude Code credentials file; all other Claude files are disposable.
 # {} is valid unauthenticated state, unlike an empty (invalid JSON) file.

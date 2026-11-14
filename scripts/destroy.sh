@@ -25,13 +25,14 @@ docker image rm agent-sandbox:local >/dev/null 2>&1 || echo 'Note: image still i
 rm -f -- persistent/ssh/ssh_host_ed25519_key persistent/ssh/ssh_host_ed25519_key.pub
 # Token and user SSH files are owned by container UID 10001, so host operator may need sudo.
 if [[ $EUID -eq 0 ]]; then
-  rm -f -- persistent/codex/auth.json persistent/claude/.credentials.json persistent/gh/token persistent/ssh/authorized_keys persistent/ssh/known_hosts persistent/git/config
+  rm -f -- persistent/codex/auth.json persistent/codex/auth.lock persistent/codex/auth-operation persistent/codex/.auth-* persistent/claude/.credentials.json persistent/gh/token persistent/ssh/authorized_keys persistent/ssh/known_hosts persistent/git/config
 else
-  sudo rm -f -- persistent/codex/auth.json persistent/claude/.credentials.json persistent/gh/token persistent/ssh/authorized_keys persistent/ssh/known_hosts persistent/git/config
+  sudo rm -f -- persistent/codex/auth.json persistent/codex/auth.lock persistent/codex/auth-operation persistent/codex/.auth-* persistent/claude/.credentials.json persistent/gh/token persistent/ssh/authorized_keys persistent/ssh/known_hosts persistent/git/config
 fi
+if [[ $EUID -eq 0 ]]; then rmdir persistent/codex 2>/dev/null || true; else sudo rmdir persistent/codex 2>/dev/null || true; fi
 rm -f -- ssh/authorized_keys .env
 # Also clean up SSH host keypair from older releases.
 rm -f -- ssh/host_keys/ssh_host_ed25519_key ssh/host_keys/ssh_host_ed25519_key.pub
 rmdir ssh/host_keys 2>/dev/null || true
-rmdir persistent/ssh persistent/codex persistent/claude persistent/gh persistent/git persistent 2>/dev/null || true
+rmdir persistent/ssh persistent/claude persistent/gh persistent/git persistent 2>/dev/null || true
 echo 'Agent Sandbox identity, credentials, container and generated configuration removed.'

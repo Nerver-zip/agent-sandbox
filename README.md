@@ -54,7 +54,6 @@ agent-sandbox/
 │   ├── agent-notify.sh            # Installed as agent-notify: end-of-turn alerts to the SSH client
 │   ├── set-gh-token.sh            # Prompt for storing a GitHub PAT
 │   ├── reset-gh-token.sh          # Script to remove the stored GitHub PAT
-│   ├── import-credentials.sh      # Interactive import of Codex/Claude logins and GitHub PAT (run by setup.sh)
 │   ├── import-codex-auth.sh       # Script to import existing Codex credentials
 │   ├── reset-codex-auth.sh        # Script to remove stored Codex credentials
 │   ├── import-claude-auth.sh      # Script to import existing Claude Code credentials
@@ -173,10 +172,6 @@ You can install packages into `~/.local/bin` or an npm user prefix during a sess
 ```
 
 To add dependencies permanently, edit `Dockerfile` and rebuild with `./scripts/up.sh --rebuild`. The `agent` account inside the container has no sudo permissions.
-
-### Importing existing logins
-
-After a `destroy.sh` (or on a fresh host) the persisted logins are empty. When `./scripts/setup.sh` runs in an interactive terminal it calls `./scripts/import-credentials.sh`, which asks only about services that are not configured yet. For Codex (`auth.json`) and Claude Code (`.credentials.json`) you can import a file found on the host, enter a local path, or pull it from the machine where you are already logged in with an scp-style source such as `user@laptop:.codex/auth.json`. It can also prompt for a GitHub PAT. Press Enter to skip any item and log in inside the sandbox instead. Set `ASBX_SKIP_IMPORT=1` to suppress the prompt; run `./scripts/import-credentials.sh` yourself at any time while the sandbox is stopped. `./scripts/up.sh` prints a reminder when Codex or Claude Code is still logged out.
 
 ### Codex authentication
 

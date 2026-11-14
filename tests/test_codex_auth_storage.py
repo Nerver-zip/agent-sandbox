@@ -78,19 +78,42 @@ class CodexWrapperLifecycleTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.assertEqual(sorted(p.name for p in self.store.iterdir()), ["auth.json", "auth.lock"])
 
+    def assert_unauthenticated(self):
+        # A bare {} auth.json makes Codex claim a ChatGPT login without a plan type,
+        # so the logged-out state must have no auth.json visible in CODEX_HOME.
+        self.assertFalse(os.path.lexists(self.link))
+        self.assertEqual(json.loads(self.auth.read_text()), {})
+        self.assertEqual(self.auth.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(sorted(p.name for p in self.store.iterdir()), ["auth.json", "auth.lock"])
+
     def test_device_login_unlinks_then_persists_new_credentials(self):
         result = self.run_wrapper("login", "--device-auth")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_auth({"tokens": {"refresh_token": "fixture-login"}})
 
-    def test_logout_and_failed_login_clear_credentials_and_restore_link(self):
+    def test_logout_and_failed_login_leave_no_auth_file_visible_to_codex(self):
         logged_out = self.run_wrapper("logout")
         self.assertEqual(logged_out.returncode, 0, logged_out.stderr)
-        self.assert_auth({})
+        self.assert_unauthenticated()
 
         failed_login = self.run_wrapper("login", "--device-auth", CODEX_FAKE_RESULT="fail")
         self.assertEqual(failed_login.returncode, 23)
-        self.assert_auth({})
+        self.assert_unauthenticated()
+
+    def test_login_after_logout_restores_link(self):
+        self.assertEqual(self.run_wrapper("logout").returncode, 0)
+        self.assert_unauthenticated()
+        result = self.run_wrapper("login", "--device-auth")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_auth({"tokens": {"refresh_token": "fixture-login"}})
+
+    def test_legacy_placeholder_link_is_removed_when_unauthenticated(self):
+        self.auth.write_text("{}\n")
+        self.assertTrue(self.link.is_symlink())
+        result = self.run_wrapper("--version")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_unauthenticated()
 
 
 class CodexDockerStorageTests(unittest.TestCase):

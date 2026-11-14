@@ -165,6 +165,7 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn('CODEX_AUTH_FILE="$CODEX_AUTH_DIR/auth.json"', entrypoint)
         self.assertIn('CODEX_AUTH_LOCK="$CODEX_AUTH_DIR/auth.lock"', entrypoint)
         self.assertIn("auth-operation", entrypoint)
+        self.assertIn("== {}", entrypoint)
 
     def test_codex_auth_isolated_directory_not_full_codex_home(self):
         self.assertEqual(self.s["environment"]["CODEX_HOME"], "/home/agent/.codex")

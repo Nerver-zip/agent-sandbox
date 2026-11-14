@@ -50,6 +50,17 @@ def atomic_store(data):
             pass
         raise
 
+def is_unauthenticated(data):
+    # Codex reports a bare {} auth.json as a ChatGPT login without a plan type.
+    # The unauthenticated state must therefore be an absent auth.json.
+    return json.loads(data) == {}
+
+def remove_link():
+    try:
+        os.unlink(link)
+    except FileNotFoundError:
+        pass
+
 def install_link():
     temporary_link = home / f".auth-link-{os.getpid()}"
     try:
@@ -69,16 +80,22 @@ try:
                 raise RuntimeError("unexpected CODEX_HOME auth.json symlink")
             if not target.is_file():
                 raise RuntimeError("persistent auth.json is missing")
+            if is_unauthenticated(target.read_bytes()):
+                remove_link()
         elif os.path.lexists(link):
             if not link.is_file():
                 raise RuntimeError("unexpected CODEX_HOME auth.json entry")
-            atomic_store(link.read_bytes())
-            install_link()
+            data = link.read_bytes()
+            atomic_store(data)
+            if is_unauthenticated(data):
+                remove_link()
+            else:
+                install_link()
         else:
             # Codex removes the symlink itself for logout and before login. Clearing
             # the target here makes that lifecycle operation durable across restarts.
+            # No link is installed: an absent auth.json means "not logged in".
             atomic_store(b"{}\n")
-            install_link()
 except Exception as error:
     print(f"Codex credential link repair failed: {error}", file=sys.stderr)
     raise SystemExit(1)

@@ -91,9 +91,25 @@ ensure_codex_link() {
   chown -h agent:agent "$link"
 }
 
-ensure_codex_link "$CODEX_HOME_AUTH" "$CODEX_AUTH_FILE"
+# Codex treats a bare {} auth.json as a ChatGPT login lacking a plan type, so the
+# unauthenticated state must be an absent file, not a link to the {} placeholder.
+if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) == {} else 1)' "$CODEX_AUTH_FILE"; then
+  if [[ -L "$CODEX_HOME_AUTH" ]]; then
+    [[ "$(readlink -- "$CODEX_HOME_AUTH")" == "$CODEX_AUTH_FILE" ]] || {
+      echo "Unexpected Codex credential link: $CODEX_HOME_AUTH" >&2
+      exit 1
+    }
+    rm -f -- "$CODEX_HOME_AUTH"
+  elif [[ -e "$CODEX_HOME_AUTH" ]]; then
+    echo "Refusing to replace unexpected Codex state: $CODEX_HOME_AUTH" >&2
+    exit 1
+  fi
+else
+  ensure_codex_link "$CODEX_HOME_AUTH" "$CODEX_AUTH_FILE"
+  test -f "$CODEX_HOME_AUTH"
+fi
 ensure_codex_link "$CODEX_HOME_LOCK" "$CODEX_AUTH_LOCK"
-test -f "$CODEX_HOME_AUTH" && test -f "$CODEX_HOME_LOCK"
+test -f "$CODEX_HOME_LOCK"
 test -f /home/agent/.claude/.credentials.json
 chown -R agent:agent /home/agent/.claude 2>/dev/null || true
 chmod 0755 /home/agent/.claude/statusline.sh 2>/dev/null || true

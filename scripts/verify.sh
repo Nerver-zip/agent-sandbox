@@ -10,15 +10,36 @@ CID=$(docker compose ps -q workspace)
 pass 'Container running'
 [[ "$(docker inspect -f '{{.HostConfig.Privileged}}' "$CID")" == false ]] || fail 'Privileged container is forbidden.'
 [[ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CID")" != host ]] || fail 'Host network is forbidden.'
-[[ "$(docker inspect -f '{{len .Mounts}}' "$CID")" == 8 ]] || fail 'Expected only 8 persistent file mounts.'
+[[ "$(docker inspect -f '{{len .Mounts}}' "$CID")" == 8 ]] || fail 'Expected only 8 allowlisted persistent mounts.'
 MOUNTS=$(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$CID" | grep -v '^$' | sort)
-EXPECTED=$(printf '%s\n' /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub /home/agent/.claude/.credentials.json /home/agent/.codex/auth.json /home/agent/.config/git /home/agent/.ssh/authorized_keys /home/agent/.ssh/known_hosts /opt/agent-secrets/gh_token | sort)
+EXPECTED=$(printf '%s\n' /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub /home/agent/.claude/.credentials.json /home/agent/.codex-auth /home/agent/.config/git /home/agent/.ssh/authorized_keys /home/agent/.ssh/known_hosts /opt/agent-secrets/gh_token | sort)
 [[ "$MOUNTS" == "$EXPECTED" ]] || fail 'Unexpected mounts detected.'
-pass 'Exactly eight allowlisted file mounts'
+pass 'Exactly eight allowlisted persistent mounts; the full CODEX_HOME is not mounted'
 docker inspect -f '{{range .HostConfig.CapAdd}}{{println .}}{{end}}' "$CID" | grep -q 'AUDIT_WRITE' || fail 'AUDIT_WRITE required for SSHD'
 pass 'SSHD audit capability present'
-[[ $(stat -c '%u:%a' persistent/codex/auth.json) == 10001:600 ]] || fail 'Codex auth file ownership/permissions invalid'
-pass 'Persisted Codex auth is UID 10001, mode 0600'
+[[ $(stat -c '%u:%a' persistent/codex) == 10001:700 ]] || fail 'Codex credential directory ownership/permissions invalid'
+if [[ $EUID -eq 0 ]]; then
+  CODEX_AUTH_STATE=$(stat -c '%F:%u:%a:%h' persistent/codex/auth.json 2>/dev/null || true)
+  CODEX_LOCK_STATE=$(stat -c '%F:%u:%a' persistent/codex/auth.lock 2>/dev/null || true)
+  CODEX_OPERATION_STATE=$(stat -c '%F:%u:%a' persistent/codex/auth-operation 2>/dev/null || true)
+  CODEX_ENTRIES=$(find persistent/codex -mindepth 1 -maxdepth 1 -printf '%f\n')
+else
+  sudo -v || fail 'sudo is required to inspect the protected Codex credential directory.'
+  CODEX_AUTH_STATE=$(sudo stat -c '%F:%u:%a:%h' persistent/codex/auth.json 2>/dev/null || true)
+  CODEX_LOCK_STATE=$(sudo stat -c '%F:%u:%a' persistent/codex/auth.lock 2>/dev/null || true)
+  CODEX_OPERATION_STATE=$(sudo stat -c '%F:%u:%a' persistent/codex/auth-operation 2>/dev/null || true)
+  CODEX_ENTRIES=$(sudo find persistent/codex -mindepth 1 -maxdepth 1 -printf '%f\n')
+fi
+[[ "$CODEX_AUTH_STATE" == 'regular file:10001:600:1' ]] || fail 'Codex auth file must be regular, UID 10001, mode 0600, without hard links'
+[[ "$CODEX_LOCK_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth lock must be regular, UID 10001, mode 0600'
+[[ -z "$CODEX_OPERATION_STATE" || "$CODEX_OPERATION_STATE" == 'regular file:10001:600' ]] || fail 'Codex auth operation marker has unsafe type, ownership, or permissions'
+while IFS= read -r entry; do
+  case "$entry" in
+    auth.json|auth.lock|auth-operation|.auth-*) ;;
+    *) fail "Unexpected file in the Codex credential directory: $entry" ;;
+  esac
+done <<< "$CODEX_ENTRIES"
+pass 'Codex auth directory is UID 10001, mode 0700; auth.json and auth.lock are mode 0600'
 [[ $(stat -c '%u:%a' persistent/claude/.credentials.json) == 10001:600 ]] || fail 'Claude credentials file ownership/permissions invalid'
 pass 'Persisted Claude credentials is UID 10001, mode 0600'
 [[ $(stat -c '%u:%a' persistent/gh/token) == 10001:400 ]] || fail 'GitHub token permissions invalid'
@@ -30,7 +51,7 @@ pass 'Persisted SSH known_hosts is UID 10001, mode 0600'
 [[ $(stat -c '%u:%a' persistent/git/config) == 10001:600 ]] || fail 'Git config permissions invalid'
 pass 'Persisted Git config is UID 10001, mode 0600'
 docker compose exec -T --user agent workspace bash -c \
-  'test ! -r /etc/ssh/ssh_host_ed25519_key && test -r /opt/agent-secrets/gh_token && test ! -w /opt/agent-secrets/gh_token && test -w /home/agent/.codex/auth.json && test -w /home/agent/.claude/.credentials.json && test -w /home/agent/.ssh/authorized_keys && test -w /home/agent/.ssh/known_hosts && test -w /home/agent/.config/git/config' \
+  'test "$CODEX_HOME" = /home/agent/.codex && test -L /home/agent/.codex/auth.json && test "$(readlink /home/agent/.codex/auth.json)" = /home/agent/.codex-auth/auth.json && test -L /home/agent/.codex/auth.lock && test "$(readlink /home/agent/.codex/auth.lock)" = /home/agent/.codex-auth/auth.lock && test "$(stat -c "%u:%a" /home/agent/.codex-auth)" = 10001:700 && test "$(stat -c "%u:%a" /home/agent/.codex-auth/auth.json)" = 10001:600 && test ! -r /etc/ssh/ssh_host_ed25519_key && test -r /opt/agent-secrets/gh_token && test ! -w /opt/agent-secrets/gh_token && test -w /home/agent/.codex/auth.json && test -w /home/agent/.claude/.credentials.json && test -w /home/agent/.ssh/authorized_keys && test -w /home/agent/.ssh/known_hosts && test -w /home/agent/.config/git/config' \
   || fail 'Agent cannot access secrets with expected permissions.'
 pass 'Agent cannot read SSH server private key or write GitHub PAT'
 docker compose exec -T --user agent workspace bash -c \

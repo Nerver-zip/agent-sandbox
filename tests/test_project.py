@@ -31,7 +31,7 @@ class ProjectContractTests(unittest.TestCase):
                 "./persistent/ssh/ssh_host_ed25519_key.pub:/etc/ssh/ssh_host_ed25519_key.pub:ro",
                 "./persistent/ssh/authorized_keys:/home/agent/.ssh/authorized_keys:rw",
                 "./persistent/ssh/known_hosts:/home/agent/.ssh/known_hosts:rw",
-                "./persistent/codex/auth.json:/home/agent/.codex/auth.json:rw",
+                "./persistent/codex:/home/agent/.codex-auth:rw",
                 "./persistent/claude/.credentials.json:/home/agent/.claude/.credentials.json:rw",
                 "./persistent/gh/token:/opt/agent-secrets/gh_token:ro",
                 "./persistent/git:/home/agent/.config/git:rw",
@@ -62,6 +62,7 @@ class ProjectContractTests(unittest.TestCase):
         for v in (
             "debian:trixie-slim", "gh gnupg", "starship", "fastfetch", "eza",
             "docker-cli docker-compose docker-buildx socat", "DOCKER_HOST=tcp://dind:2375",
+            "scripts/codex-wrapper.sh",
             "zsh-autosuggestions", "zsh-syntax-highlighting", "openssh-server",
             "npm install --global", "@openai/codex", "@anthropic-ai/claude-code", "antigravity.google/cli/install.sh",
             "config/tmux.conf",
@@ -113,7 +114,8 @@ class ProjectContractTests(unittest.TestCase):
         for v in (
             "ssh-keygen -y", "ssh/host_keys/", "/etc/ssh/ssh_host_ed25519_key",
             "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
-            "persistent/codex/auth.json", "persistent/claude/.credentials.json",
+            'AUTH_FILE="$CODEX_DIR/auth.json"', 'AUTH_LOCK="$CODEX_DIR/auth.lock"', "chmod 0700",
+            "persistent/claude/.credentials.json",
             "persistent/gh/token", "persistent/git",
             "chown 10001:10001", "chmod 0400",
         ):
@@ -131,7 +133,7 @@ class ProjectContractTests(unittest.TestCase):
             "docker compose down --remove-orphans --volumes",
             "firewall.sh remove", "persistent/ssh/ssh_host_ed25519_key",
             "persistent/ssh/authorized_keys", "persistent/ssh/known_hosts",
-            "persistent/codex/auth.json", "persistent/claude/.credentials.json",
+            "persistent/codex/auth.json", "persistent/codex/auth.lock", "persistent/claude/.credentials.json",
             "persistent/gh/token", "persistent/git/config",
             "ssh/authorized_keys .env",
         ):
@@ -150,6 +152,7 @@ class ProjectContractTests(unittest.TestCase):
     def test_dockerignore_allows_all_copied_scripts(self):
         di = (ROOT / '.dockerignore').read_text()
         self.assertIn('!scripts/container-entrypoint.sh', di)
+        self.assertIn('!scripts/codex-wrapper.sh', di)
         self.assertIn('!scripts/gh-wrapper.sh', di)
         self.assertIn('!scripts/agent-notify.sh', di)
 
@@ -157,6 +160,21 @@ class ProjectContractTests(unittest.TestCase):
         entrypoint = (ROOT / "scripts/container-entrypoint.sh").read_text()
         self.assertIn("socat UNIX-LISTEN:/var/run/docker.sock", entrypoint)
         self.assertIn("TCP:dind:2375", entrypoint)
+        self.assertIn("ensure_codex_link", entrypoint)
+        self.assertIn("CODEX_AUTH_DIR=/home/agent/.codex-auth", entrypoint)
+        self.assertIn('CODEX_AUTH_FILE="$CODEX_AUTH_DIR/auth.json"', entrypoint)
+        self.assertIn('CODEX_AUTH_LOCK="$CODEX_AUTH_DIR/auth.lock"', entrypoint)
+        self.assertIn("auth-operation", entrypoint)
+
+    def test_codex_auth_isolated_directory_not_full_codex_home(self):
+        self.assertEqual(self.s["environment"]["CODEX_HOME"], "/home/agent/.codex")
+        self.assertEqual(self.s["environment"]["CODEX_AUTH_DIR"], "/home/agent/.codex-auth")
+        self.assertIn("./persistent/codex:/home/agent/.codex-auth:rw", self.s["volumes"])
+        self.assertNotIn("/home/agent/.codex:", str(self.s["volumes"]))
+        self.assertNotIn("persistent/codex/auth.json:/home/agent/.codex/auth.json", str(self.s["volumes"]))
+        self.assertIn("CODEX_DIR", (ROOT / "scripts/setup.sh").read_text())
+        self.assertIn("auth.lock", (ROOT / "scripts/verify.sh").read_text())
+        self.assertIn("auth-operation", (ROOT / "scripts/codex-wrapper.sh").read_text())
 
     def test_up_preserves_existing_containers_unless_rebuild(self):
         up = (ROOT / "scripts/up.sh").read_text()

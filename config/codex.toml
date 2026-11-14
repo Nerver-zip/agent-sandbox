@@ -1,5 +1,5 @@
-# Persist credentials in CODEX_HOME/auth.json only.
-# Config, history, sessions, caches, and workspace are baked/ephemeral.
+# Persist auth.json through the entrypoint symlink into the isolated credential directory.
+# Config, history, sessions, caches, and workspace stay in ephemeral CODEX_HOME.
 cli_auth_credentials_store = "file"
 
 # Desktop notification on the SSH client when a turn ends.

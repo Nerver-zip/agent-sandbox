@@ -126,6 +126,16 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("/opt/agent-secrets/gh_token", gh)
         self.assertIn("read -rs TOKEN", (ROOT / "scripts/set-gh-token.sh").read_text())
         self.assertIn("set-gh-token.sh", (ROOT / "README.md").read_text())
+        self.assertIn("import-git-config.sh", (ROOT / "README.md").read_text())
+        self.assertIn("reset-git-config.sh", (ROOT / "README.md").read_text())
+
+    def test_git_config_import_and_reset_scripts(self):
+        import_sh = (ROOT / "scripts/import-git-config.sh").read_text()
+        self.assertIn("persistent/git/config", import_sh)
+        self.assertIn("user.name", import_sh)
+        self.assertIn("user.email", import_sh)
+        reset_sh = (ROOT / "scripts/reset-git-config.sh").read_text()
+        self.assertIn("persistent/git/config", reset_sh)
 
     def test_destroy_removes_all_generated_state(self):
         d = (ROOT / "scripts/destroy.sh").read_text()

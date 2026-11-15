@@ -23,6 +23,9 @@ run_priv() {
 if [[ -n "${1:-}" ]]; then
   [[ -r "$1" ]] || fail "Public key missing: $1 (pass its path as argument)"
 fi
+if [[ -n "${2:-}" ]]; then
+  [[ -r "$2" && -f "$2" && ! -L "$2" ]] || fail "Git config missing or unreadable: $2 (pass path to .gitconfig as second argument)"
+fi
 TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
 [[ "$TS_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Tailscale host IPv4 not detected.'
 
@@ -256,8 +259,19 @@ fi
 if [[ -f "$GIT_CONFIG_FILE" && -s "$GIT_CONFIG_FILE" ]]; then
   echo 'Keeping existing Git configuration.'
 else
-  DETECTED_NAME=$(git config --global user.name 2>/dev/null || true)
-  DETECTED_EMAIL=$(git config --global user.email 2>/dev/null || true)
+  DETECTED_NAME=
+  DETECTED_EMAIL=
+
+  if [[ -n "${2:-}" ]]; then
+    DETECTED_NAME=$(git config -f "$2" user.name 2>/dev/null || true)
+    DETECTED_EMAIL=$(git config -f "$2" user.email 2>/dev/null || true)
+    [[ -n "$DETECTED_NAME" && -n "$DETECTED_EMAIL" ]] || fail "Failed to extract user.name and user.email from $2"
+  fi
+
+  if [[ -z "$DETECTED_NAME" || -z "$DETECTED_EMAIL" ]]; then
+    DETECTED_NAME=$(git config --global user.name 2>/dev/null || true)
+    DETECTED_EMAIL=$(git config --global user.email 2>/dev/null || true)
+  fi
 
   if [[ -z "$DETECTED_NAME" || -z "$DETECTED_EMAIL" ]]; then
     if [[ -n "${OLD_CID:-}" ]]; then

@@ -58,6 +58,8 @@ agent-sandbox/
 │   ├── reset-codex-auth.sh        # Script to remove stored Codex credentials
 │   ├── import-claude-auth.sh      # Script to import existing Claude Code credentials
 │   ├── reset-claude-auth.sh       # Script to remove stored Claude Code credentials
+│   ├── import-git-config.sh       # Script to import Git author identity (.gitconfig or name/email)
+│   ├── reset-git-config.sh        # Script to reset stored Git author identity
 │   ├── install-packages.sh        # Temporary package installation helper
 │   └── container-entrypoint.sh    # Container initialization and Docker socket bridge
 ├── docs/
@@ -97,7 +99,8 @@ Run setup on the host where Docker and Tailscale are installed:
 cd ~/prod/agent-sandbox
 
 # Authorize your public key (or omit the path to use ~/.ssh/id_ed25519.pub)
-./scripts/setup.sh ~/agent-key.pub
+# Optionally pass a .gitconfig file to import your Git identity
+./scripts/setup.sh ~/agent-key.pub ~/client.gitconfig
 
 # Configure firewall rules and start the environment
 ./scripts/up.sh
@@ -270,7 +273,38 @@ To rotate or remove the token, revoke it in GitHub and run `./scripts/set-gh-tok
 
 ### Git identity
 
-The setup script automatically detects the host machine's `user.name` and `user.email` from Git and writes them to `persistent/git/config`. This directory is mounted at `/home/agent/.config/git`, allowing `git commit` and `git config --global` to operate directly inside the container without manual configuration. Changes made with `git config --global` inside the sandbox persist across container recreations.
+The setup script automatically detects the host machine's `user.name` and `user.email` from Git and writes them to `persistent/git/config`. If you deploy from a remote client machine where your Git configuration lives, pass your `.gitconfig` to `setup.sh`:
+
+```bash
+scp ~/.gitconfig nerver@100.118.53.107:~/client.gitconfig
+./scripts/setup.sh ~/agent-key.pub ~/client.gitconfig
+```
+
+To import an existing `.gitconfig` from another machine at any time:
+
+```bash
+docker compose stop
+./scripts/import-git-config.sh /path/to/.gitconfig
+./scripts/up.sh
+```
+
+You can also import directly with a name and email:
+
+```bash
+docker compose stop
+./scripts/import-git-config.sh "Marcelo Augusto" "marceloaugusto12161@gmail.com"
+./scripts/up.sh
+```
+
+To delete stored Git identity and reset to default:
+
+```bash
+docker compose stop
+./scripts/reset-git-config.sh
+./scripts/up.sh
+```
+
+This directory is mounted at `/home/agent/.config/git`, allowing `git commit` and `git config --global` to operate directly inside the container without manual configuration. Changes made with `git config --global` inside the sandbox persist across container recreations.
 
 ### Antigravity CLI
 

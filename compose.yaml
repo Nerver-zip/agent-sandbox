@@ -53,8 +53,8 @@ services:
       - no-new-privileges:true
     cgroup: private
     pids_limit: 256
-    mem_limit: ${AGENT_MEMORY:-3g}
-    memswap_limit: ${AGENT_MEMORY:-3g}
+    mem_limit: ${AGENT_MEMORY:-6g}
+    memswap_limit: ${AGENT_MEMSWAP:-10g}
     cpus: ${AGENT_CPUS:-2.0}
     ulimits:
       nofile:

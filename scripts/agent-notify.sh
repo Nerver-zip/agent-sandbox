@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# agent-notify <claude|codex|agy> [json-payload]
+# agent-notify <claude|codex|agy|opencode> [json-payload]
 # Notifies the SSH client's desktop when an agent turn ends, with or without tmux.
 # The container has no display or D-Bus, so the notification is an OSC escape
 # sequence that the client terminal turns into a native desktop notification.
 # Inside tmux the sequence is wrapped in a DCS passthrough (allow-passthrough on).
 # A BEL is also sent so tmux marks the window in the status bar.
-# Payload comes from stdin (Claude Code, agy) or the last argv (Codex `notify`).
+# Payload comes from stdin (Claude Code, agy, the OpenCode plugin) or the last argv (Codex `notify`).
 # Always exits 0 and never writes to stdout, so it cannot break hook contracts.
 #
 # AGENT_NOTIFY_OSC selects the protocol understood by the client terminal:
@@ -20,6 +20,7 @@ case "$provider" in
   claude) title="Claude Code" ;;
   codex)  title="Codex" ;;
   agy)    title="Antigravity" ;;
+  opencode) title="OpenCode" ;;
   *)      title="$provider" ;;
 esac
 

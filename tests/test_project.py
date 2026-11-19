@@ -1,5 +1,6 @@
 """Static guardrails. Do not confuse them with runtime escape/egress testing."""
 from pathlib import Path
+import json
 import subprocess
 import tomllib
 import unittest
@@ -64,7 +65,7 @@ class ProjectContractTests(unittest.TestCase):
             "docker-cli docker-compose docker-buildx socat", "DOCKER_HOST=tcp://dind:2375",
             "scripts/codex-wrapper.sh",
             "zsh-autosuggestions", "zsh-syntax-highlighting", "openssh-server",
-            "npm install --global", "@openai/codex", "@anthropic-ai/claude-code", "antigravity.google/cli/install.sh",
+            "npm install --global", "@openai/codex", "@anthropic-ai/claude-code", "opencode-ai@${OPENCODE_VERSION}", "config/opencode", "antigravity.google/cli/install.sh",
             "config/tmux.conf",
             "config/nvim",
             "config/claude",
@@ -188,6 +189,16 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("regular empty file:10001:600", (ROOT / "scripts/up.sh").read_text())
         self.assertIn("regular empty file:10001:600", (ROOT / "scripts/verify.sh").read_text())
         self.assertIn("auth-operation", (ROOT / "scripts/codex-wrapper.sh").read_text())
+
+    def test_opencode_installed_with_notification_plugin(self):
+        self.assertEqual(self.s["build"]["args"]["OPENCODE_VERSION"], "${OPENCODE_VERSION:-latest}")
+        cfg = json.loads((ROOT / "config/opencode/opencode.json").read_text())
+        self.assertFalse(cfg["autoupdate"])
+        plugin = (ROOT / "config/opencode/plugins/agent-notify.js").read_text()
+        for v in ("session.idle", "session.status", "agent-notify", '"opencode"'):
+            self.assertIn(v, plugin)
+        self.assertIn("opencode)", (ROOT / "scripts/agent-notify.sh").read_text())
+        self.assertIn("opencode", (ROOT / "scripts/verify.sh").read_text())
 
     def test_up_preserves_existing_containers_unless_rebuild(self):
         up = (ROOT / "scripts/up.sh").read_text()

@@ -4,6 +4,7 @@ FROM debian:trixie-slim
 
 ARG CODEX_VERSION=latest
 ARG CLAUDE_VERSION=latest
+ARG OPENCODE_VERSION=latest
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     EDITOR=nvim VISUAL=nvim \
@@ -36,9 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Build-time CLIs are installed into immutable image layers, not into the disposable workspace.
 # CODEX_VERSION and CLAUDE_VERSION can be pinned using --build-arg or via compose.yaml build.args.
-RUN npm install --global "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+RUN npm install --global "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" "opencode-ai@${OPENCODE_VERSION}" \
     && command -v codex && codex --version \
     && command -v claude && claude --version \
+    && command -v opencode && opencode --version \
     && CODEX_BIN="$(command -v codex)" \
     && CODEX_REAL_BIN="${CODEX_BIN}-cli" \
     && mv "$CODEX_BIN" "$CODEX_REAL_BIN" \
@@ -65,6 +67,7 @@ COPY --chown=agent:agent --chmod=0644 config/codex.toml /home/agent/.codex/confi
 COPY --chown=agent:agent config/claude /home/agent/.claude
 RUN chmod 0755 /home/agent/.claude/statusline.sh 2>/dev/null || true
 COPY --chown=agent:agent config/gemini /home/agent/.gemini
+COPY --chown=agent:agent config/opencode /home/agent/.config/opencode
 COPY --chown=agent:agent --chmod=0644 config/tmux.conf /home/agent/.tmux.conf
 COPY --chown=agent:agent config/nvim /home/agent/.config/nvim
 RUN su -s /bin/bash agent -c 'nvim --headless -c "Lazy! restore" -c "TSInstallSync! bash python json yaml javascript typescript" -c "qa"' 2>/dev/null || true

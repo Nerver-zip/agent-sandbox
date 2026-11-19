@@ -14,7 +14,7 @@ This setup does not provide virtual machine isolation or protect against kernel 
 | Shell and terminal | Zsh, [Oh My Zsh](https://ohmyz.sh/), `git` plugin, autosuggestions, syntax highlighting, Starship prompt, Fastfetch |
 | Development tools | Neovim, tmux, eza, fzf, ripgrep, fd, jq, htop, Git, curl, Python, pipx, Node.js/npm, C/C++ toolchain, CMake |
 | Docker runtime | Docker CLI, Compose v2, and Buildx connected to an isolated Docker-in-Docker (`dind`) sidecar |
-| Agent CLIs | [Codex CLI](https://github.com/openai/codex) (`codex`), [Claude Code](https://github.com/anthropics/claude-code) (`claude`), and [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`) built into the image |
+| Agent CLIs | [Codex CLI](https://github.com/openai/codex) (`codex`), [Claude Code](https://github.com/anthropics/claude-code) (`claude`), [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`), and [OpenCode](https://opencode.ai/) (`opencode`) built into the image |
 | GitHub integration | GitHub CLI (`gh`), optional fine-grained PAT mounted read-only, and HTTPS Git credential helper |
 | Network access | OpenSSH service listening on the host Tailscale address at port 2222 with public-key authentication |
 | Isolation controls | Dedicated Docker bridge, host firewall rules, unprivileged user, and resource limits (CPU, memory, PIDs) |
@@ -43,7 +43,8 @@ agent-sandbox/
 │   ├── tmux.conf                  # Scrollback, mouse, focus events, passthrough, bell, and reload shortcut
 │   ├── nvim/                      # Minimal Neovim setup (Catppuccin, Telescope, Nvim-Tree)
 │   ├── claude/                    # Claude Code configuration, preferences, and statusline
-│   └── gemini/                    # Antigravity CLI preferences and Catppuccin theme
+│   ├── gemini/                    # Antigravity CLI preferences and Catppuccin theme
+│   └── opencode/                  # OpenCode config and agent-notify plugin
 ├── scripts/
 │   ├── setup.sh                   # SSH key generation, migration, and credential setup
 │   ├── up.sh                      # Firewall verification, image build, and container startup
@@ -150,6 +151,7 @@ fastfetch
 codex --version
 claude --version
 agy --version
+opencode --version
 gh --version
 tmux new -s agents
 
@@ -157,6 +159,7 @@ tmux new -s agents
 codex
 claude
 agy
+opencode
 ```
 
 Interactive sessions open in Zsh. Common aliases include `ls` for Eza and `v` for Neovim.
@@ -306,6 +309,10 @@ docker compose stop
 
 This directory is mounted at `/home/agent/.config/git`, allowing `git commit` and `git config --global` to operate directly inside the container without manual configuration. Changes made with `git config --global` inside the sandbox persist across container recreations.
 
+### OpenCode
+
+OpenCode (`opencode`) is installed from the `opencode-ai` npm package; pin a release with `OPENCODE_VERSION` in `.env`. The image ships `/home/agent/.config/opencode/opencode.json` (Catppuccin theme, auto-update off) and a global plugin, `plugins/agent-notify.js`, that calls `agent-notify opencode` when a session goes idle. Run `opencode` inside tmux and sign in with `opencode auth login`. Credentials live under `~/.local/share/opencode` in the container's temporary filesystem and are cleared when the container is recreated.
+
 ### Antigravity CLI
 
 The Antigravity CLI (`agy`) is installed in `/home/agent/.local/bin/agy`. To authenticate, run `agy` and follow the URL displayed in the terminal to complete Google account verification in a browser. Session tokens are kept in the container's temporary filesystem and are cleared when the container is recreated with `docker compose down`.
@@ -393,7 +400,7 @@ The script `verify.sh` checks mounts, capabilities, tool availability, and host 
 
 ## Security considerations
 
-The image installs the latest versions of Codex, Oh My Zsh, and the Antigravity CLI at build time. To pin a specific Codex release, set `CODEX_VERSION` in `.env`.
+The image installs the latest versions of Codex, Oh My Zsh, and the Antigravity CLI at build time. To pin a specific Codex or OpenCode release, set `CODEX_VERSION` or `OPENCODE_VERSION` in `.env`.
 
 Host reboots or firewall reloads can flush iptables rules. For unattended restarts, install the example systemd unit in `docs/agent-sandbox.service.example` to ensure `up.sh` runs and restores firewall rules before the containers start.
 
@@ -411,7 +418,7 @@ Containers share the host kernel. For untrusted code execution requiring strong 
 
 ## Client notifications
 
-Claude Code, Codex, and Antigravity call `agent-notify` when a turn ends. The container has no display, so the script emits an OSC 99 escape sequence (kitty protocol) (wrapped in tmux DCS passthrough when inside tmux) that your SSH client terminal turns into a native desktop notification. It also rings the bell so tmux flags the window.
+Claude Code, Codex, Antigravity, and OpenCode (through its `agent-notify.js` plugin) call `agent-notify` when a turn ends. The container has no display, so the script emits an OSC 99 escape sequence (kitty protocol) (wrapped in tmux DCS passthrough when inside tmux) that your SSH client terminal turns into a native desktop notification. It also rings the bell so tmux flags the window.
 
 - Works over SSH with or without tmux, as long as the client terminal supports the protocol (kitty by default).
 - Other terminals: set `AGENT_NOTIFY_OSC` to `777` (foot, Ghostty, WezTerm, Konsole), `9` (iTerm2, Windows Terminal), or `off`.

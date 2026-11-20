@@ -205,8 +205,6 @@ def cache_archive(component):
                          "nvim-web-devicons", "gitsigns.nvim"):
                 entries.append(("root/.local/share/nvim/lazy/%s/README.md" % name, b"fake plugin\n", 0o644))
             entries.append(("root/.local/share/nvim/lazy/nvim-treesitter/parser/bash.so", b"fake parser\n", 0o644))
-            entries.append(("root/.local/state/nvim/shada/main.shada", b"fake state\n", 0o600))
-            entries.append(("root/.cache/nvim/lazy/cache.json", b"{}\n", 0o644))
         elif component == "shell":
             entries.append(("opt/oh-my-zsh/oh-my-zsh.sh", b"# fake omz\n", 0o644))
             entries.append(("usr/local/bin/starship", b"#!/bin/sh\nexit 0\n", 0o755))
@@ -730,7 +728,7 @@ class ColabScriptTests(unittest.TestCase):
             self.assertTrue(names)
             for name in names:
                 self.assertTrue(
-                    name.startswith("root/.local/") or name.startswith("root/.cache/"),
+                    name.startswith("root/.local/share/nvim/"),
                     name,
                 )
             self.assertIn("sha256=", meta.read_text())
@@ -980,6 +978,7 @@ class ColabStaticContractTests(unittest.TestCase):
             "root/.ssh",
             "root/.codex",
             "root/.claude",
+            "root/.local/state/nvim",
             "root/workspace",
             "auth.json",
             "id_rsa",
@@ -987,7 +986,7 @@ class ColabStaticContractTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, text)
-        for allowed in ("root/.local/share/nvim", "root/.local/state/nvim", "opt/oh-my-zsh", "usr/local/bin/starship"):
+        for allowed in ("root/.local/share/nvim", "opt/oh-my-zsh", "usr/local/bin/starship"):
             self.assertIn(allowed, text)
 
     def test_cache_helper_rejects_unsafe_archive_paths(self):

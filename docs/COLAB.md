@@ -251,7 +251,7 @@ Colab's direct package mirrors.
 
 | Component | Contents | Approx. compressed size | Status |
 |---|---|---|---|
-| `nvim-plugins` | Lazy.nvim plugins, Treesitter parsers, Neovim state/cache | 15-20 MiB | opt-in |
+| `nvim-plugins` | Lazy.nvim plugins and Treesitter parsers | 15-20 MiB | opt-in |
 | `shell` | `/opt/oh-my-zsh` and the Starship binary | 5-15 MiB | opt-in |
 
 `nvim-plugins` is the recommended component because it removes the most CPU and
@@ -275,7 +275,7 @@ The cache never contains:
 - `/home/agent/workspace` or any project file
 - agent configuration or credentials (`~/.codex`, `~/.claude`, `~/.config/opencode`, `~/.gemini`)
 - SSH keys or `~/.ssh`
-- GitHub tokens, shell history, or npm credentials
+- GitHub tokens, shell history, Neovim shada/state, or npm credentials
 
 ### Lifecycle
 

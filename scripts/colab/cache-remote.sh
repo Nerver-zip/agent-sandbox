@@ -37,9 +37,7 @@ component_paths() {
   case "$1" in
     nvim-plugins)
       printf '%s\n' \
-        root/.local/share/nvim \
-        root/.local/state/nvim \
-        root/.cache/nvim
+        root/.local/share/nvim
       ;;
     shell)
       printf '%s\n' \

@@ -11,11 +11,17 @@ COLAB_KEY_DEFAULT="$COLAB_SSH_DIR/id_ed25519"
 COLAB_SSH_CONFIG="$COLAB_SSH_DIR/config"
 COLAB_GITCONFIG="$COLAB_DIR/gitconfig"
 COLAB_LOCK_DIR="$COLAB_DIR/lock.d"
+COLAB_CACHE_DIR="$COLAB_DIR/cache"
+COLAB_CACHE_FORMAT=1
+COLAB_CACHE_KEEP_DEFAULT=2
+COLAB_CACHE_MAX_MB_DEFAULT=1024
 
 COLAB_HOST="agent-sandbox-colab"
 COLAB_FORCE_HOST="agent-sandbox-colab-force"
 COLAB_STATE_DIR="/root/.agent-sandbox"
 COLAB_REMOTE_MARKER="$COLAB_STATE_DIR/bootstrap-version"
+COLAB_REMOTE_STAGE="/tmp/agent-sandbox-bootstrap"
+COLAB_REMOTE_CACHE_HELPER="$COLAB_REMOTE_STAGE/cache-remote.sh"
 
 log() {
   if [[ ${AGENT_COLAB_STDERR:-0} == 1 ]]; then
@@ -131,6 +137,10 @@ load_config() {
   : "${COLAB_SSH_WAIT_ATTEMPTS:=30}"
   : "${COLAB_SSH_WAIT_SECONDS:=2}"
   : "${COLAB_CLI:=}"
+  : "${COLAB_CACHE:=0}"
+  : "${COLAB_CACHE_KEEP:=$COLAB_CACHE_KEEP_DEFAULT}"
+  : "${COLAB_CACHE_MAX_MB:=$COLAB_CACHE_MAX_MB_DEFAULT}"
+  : "${COLAB_CACHE_COMPONENTS:=nvim-plugins}"
 
   validate_session_name "$COLAB_SESSION"
   case "$COLAB_AUTH" in
@@ -147,6 +157,20 @@ load_config() {
   esac
   validate_positive_int "$COLAB_SSH_WAIT_ATTEMPTS" COLAB_SSH_WAIT_ATTEMPTS
   validate_nonnegative_int "$COLAB_SSH_WAIT_SECONDS" COLAB_SSH_WAIT_SECONDS
+  case "$COLAB_CACHE" in
+    0|1) ;;
+    *) die 'COLAB_CACHE must be 0 or 1.' ;;
+  esac
+  validate_positive_int "$COLAB_CACHE_KEEP" COLAB_CACHE_KEEP
+  validate_positive_int "$COLAB_CACHE_MAX_MB" COLAB_CACHE_MAX_MB
+  [[ -n $COLAB_CACHE_COMPONENTS ]] || die 'COLAB_CACHE_COMPONENTS must list at least one component.'
+  local component
+  for component in $COLAB_CACHE_COMPONENTS; do
+    case "$component" in
+      nvim-plugins|shell) ;;
+      *) die "COLAB_CACHE_COMPONENTS contains an unknown component: $component" ;;
+    esac
+  done
   [[ -z $COLAB_ENDPOINT || $COLAB_ENDPOINT =~ ^[A-Za-z0-9._-]+$ ]] || die 'COLAB_ENDPOINT has an invalid value.'
   [[ -z $COLAB_ACCELERATOR || $COLAB_ACCELERATOR =~ ^[A-Za-z0-9]+$ ]] || die 'COLAB_ACCELERATOR has an invalid value.'
   [[ -z $COLAB_TPU || $COLAB_TPU =~ ^[A-Za-z0-9]+$ ]] || die 'COLAB_TPU has an invalid value.'
@@ -389,6 +413,23 @@ wait_for_ssh() {
   return 1
 }
 
+workspace_is_empty() {
+  local output rc=0
+  output=$(ssh_run "if [ -d $COLAB_WORKSPACE ]; then find $COLAB_WORKSPACE -mindepth 1 -maxdepth 1 -print -quit; fi" 2>/dev/null) || rc=$?
+  [[ $rc -eq 0 ]] || return 2
+  [[ -z $output ]]
+}
+
+remote_network_bytes() {
+  local direction=$1
+  ssh_run "for i in /sys/class/net/*; do [ \"\${i##*/}\" = lo ] && continue; cat \"\$i/statistics/${direction}_bytes\" 2>/dev/null || true; done" \
+    | awk '{sum += $1} END {printf "%.0f\n", sum}'
+}
+
+cache_local_lazy_lock() {
+  sha256_file "$COLAB_REPO_ROOT/config/nvim/lazy-lock.json" | awk '{print $1}'
+}
+
 acquire_lock() {
   mkdir -p "$COLAB_DIR"
   chmod 0700 "$COLAB_DIR" 2>/dev/null || true
@@ -417,6 +458,7 @@ payload_hash() {
     cd "$COLAB_REPO_ROOT" || exit 1
     {
       printf '%s\n' 'scripts/colab/bootstrap.sh'
+      printf '%s\n' 'scripts/colab/cache-remote.sh'
       printf '%s\n' 'scripts/agent-notify.sh'
       find config -type f -print
       if [[ -f $COLAB_GITCONFIG ]]; then
@@ -437,6 +479,7 @@ make_payload() {
   mkdir -p "$staging/payload"
   cp -R "$COLAB_REPO_ROOT/config" "$staging/payload/config"
   cp "$COLAB_REPO_ROOT/scripts/colab/bootstrap.sh" "$staging/payload/bootstrap.sh"
+  cp "$COLAB_REPO_ROOT/scripts/colab/cache-remote.sh" "$staging/payload/cache-remote.sh"
   cp "$COLAB_REPO_ROOT/scripts/agent-notify.sh" "$staging/payload/agent-notify.sh"
   if [[ -f $COLAB_GITCONFIG ]]; then
     cp "$COLAB_GITCONFIG" "$staging/payload/gitconfig"
@@ -447,7 +490,8 @@ make_payload() {
     printf 'OPENCODE_VERSION=%q\n' "$COLAB_OPENCODE_VERSION"
     printf 'AGY_INSTALL=%q\n' "$COLAB_AGY_INSTALL"
   } > "$staging/payload/env"
-  chmod 0644 "$staging/payload/env" "$staging/payload/bootstrap.sh" "$staging/payload/agent-notify.sh"
+  chmod 0644 "$staging/payload/env" "$staging/payload/bootstrap.sh" \
+    "$staging/payload/cache-remote.sh" "$staging/payload/agent-notify.sh"
   tar -C "$staging/payload" -czf "$staging/payload.tar.gz" .
   printf '%s\n' "$staging"
 }
@@ -456,23 +500,36 @@ remote_marker() {
   ssh_run "cat $COLAB_REMOTE_MARKER 2>/dev/null || true" | tr -d '\r' | head -n 1
 }
 
+stage_payload() {
+  local staging=$1
+  ssh_run "rm -rf $COLAB_REMOTE_STAGE && mkdir -p $COLAB_REMOTE_STAGE && tar -xzf - -C $COLAB_REMOTE_STAGE" \
+    < "$staging/payload.tar.gz"
+}
+
+run_bootstrap() {
+  local force=$1
+  local version=$2
+  local args_list="--version $version"
+  [[ $force -eq 1 ]] && args_list="$args_list --force"
+  local rc=0
+  ssh_run "bash $COLAB_REMOTE_STAGE/bootstrap.sh $args_list" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    printf '\n--- remote bootstrap log (tail) ---\n' >&2
+    ssh_run "tail -n 80 $COLAB_STATE_DIR/bootstrap.log 2>/dev/null || true" >&2 || true
+    printf '%s\n' '--- end remote bootstrap log ---' >&2
+  fi
+  return "$rc"
+}
+
 bootstrap_runtime() {
   local force=$1
   local version=$2
   local staging
   staging=$(make_payload)
   local rc=0
-  if ! ssh_run "rm -rf /tmp/agent-sandbox-bootstrap && mkdir -p /tmp/agent-sandbox-bootstrap && tar -xzf - -C /tmp/agent-sandbox-bootstrap" < "$staging/payload.tar.gz"; then
-    rm -rf -- "$staging"
-    return 1
-  fi
-  local args_list="--version $version"
-  [[ $force -eq 1 ]] && args_list="$args_list --force"
-  ssh_run "bash /tmp/agent-sandbox-bootstrap/bootstrap.sh $args_list" || rc=$?
-  if [[ $rc -ne 0 ]]; then
-    printf '\n--- remote bootstrap log (tail) ---\n' >&2
-    ssh_run "tail -n 80 $COLAB_STATE_DIR/bootstrap.log 2>/dev/null || true" >&2 || true
-    printf '%s\n' '--- end remote bootstrap log ---' >&2
+  stage_payload "$staging" || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    run_bootstrap "$force" "$version" || rc=$?
   fi
   rm -rf -- "$staging"
   return "$rc"
@@ -486,4 +543,363 @@ human_size() {
       printf '%s bytes' "$(wc -c < "$1" | tr -d ' ')"
     fi
   fi
+}
+
+human_bytes() {
+  awk -v bytes="${1:-0}" 'BEGIN {
+    if (bytes >= 1073741824) printf "%.1f GiB", bytes / 1073741824;
+    else if (bytes >= 1048576) printf "%.1f MiB", bytes / 1048576;
+    else if (bytes >= 1024) printf "%.1f KiB", bytes / 1024;
+    else printf "%d B", bytes;
+  }'
+}
+
+# ---------------------------------------------------------------------------
+# Environment cache
+#
+# Only paths listed in scripts/colab/cache-remote.sh are ever captured. The
+# local side owns manifests and checksums; the remote side owns extraction and
+# path validation. A cache artifact is never trusted until its size/sha256 match
+# the manifest and the runtime has passed the normal bootstrap validation.
+# ---------------------------------------------------------------------------
+
+cache_enabled() {
+  [[ ${COLAB_CACHE:-1} == 1 ]]
+}
+
+cache_component_enabled() {
+  local wanted=$1
+  local component
+  for component in ${COLAB_CACHE_COMPONENTS:-nvim-plugins}; do
+    [[ $component == "$wanted" ]] && return 0
+  done
+  return 1
+}
+
+cache_format_dir() {
+  printf '%s/v%s' "$COLAB_CACHE_DIR" "$COLAB_CACHE_FORMAT"
+}
+
+cache_profile_id() {
+  local raw=${1:-unknown}
+  printf '%s' "$raw" \
+    | tr -c 'A-Za-z0-9._-' '-' \
+    | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//'
+}
+
+cache_component_dir() {
+  local profile=$1
+  local component=$2
+  printf '%s/%s/%s' "$(cache_format_dir)" "$profile" "$component"
+}
+
+cache_meta_get() {
+  local file=$1
+  local wanted=$2
+  local key value
+  [[ -f $file ]] || return 1
+  while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
+    if [[ $key == "$wanted" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done < "$file"
+  return 1
+}
+
+cache_meta_write() {
+  local file=$1
+  shift
+  local tmp="${file}.tmp.$$"
+  : > "$tmp" || return 1
+  while [[ $# -gt 1 ]]; do
+    printf '%s=%s\n' "$1" "$2" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    shift 2
+  done
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$file"
+}
+
+cache_artifact_path() {
+  local meta=$1
+  printf '%s\n' "${meta%.meta}.tar.gz"
+}
+
+cache_validate_artifact() {
+  local meta=$1
+  local archive size expected actual
+  local sha expected_sha
+  [[ -f $meta ]] || return 1
+  [[ "$(cache_meta_get "$meta" format || true)" == "$COLAB_CACHE_FORMAT" ]] || return 1
+  archive=$(cache_artifact_path "$meta")
+  [[ -f $archive && -r $archive ]] || return 1
+  size=$(cache_meta_get "$meta" size || true)
+  expected=$(wc -c < "$archive" | tr -d ' ')
+  [[ -n $size && $size == "$expected" ]] || return 1
+  sha=$(cache_meta_get "$meta" sha256 || true)
+  expected_sha=$(sha256_file "$archive" | awk '{print $1}')
+  [[ -n $sha && $sha == "$expected_sha" ]] || return 1
+  return 0
+}
+
+cache_find_meta() {
+  local profile=$1
+  local component=$2
+  local lock_filter=${3:-}
+  local dir meta epoch best= best_epoch=-1
+  dir=$(cache_component_dir "$profile" "$component")
+  for meta in "$dir"/*.meta; do
+    [[ -f $meta ]] || continue
+    [[ "$(cache_meta_get "$meta" format || true)" == "$COLAB_CACHE_FORMAT" ]] || continue
+    [[ "$(cache_meta_get "$meta" profile || true)" == "$profile" ]] || continue
+    [[ "$(cache_meta_get "$meta" component || true)" == "$component" ]] || continue
+    if [[ -n $lock_filter && "$(cache_meta_get "$meta" lazy_lock || true)" != "$lock_filter" ]]; then
+      continue
+    fi
+    epoch=$(cache_meta_get "$meta" created_epoch || true)
+    [[ $epoch =~ ^[0-9]+$ ]] || epoch=0
+    if [[ $epoch -gt $best_epoch ]]; then
+      best=$meta
+      best_epoch=$epoch
+    fi
+  done
+  [[ -n $best ]] || return 1
+  printf '%s\n' "$best"
+}
+
+cache_discard_meta() {
+  local meta=$1
+  local archive
+  [[ -n $meta ]] || return 0
+  archive=$(cache_artifact_path "$meta")
+  rm -f -- "$meta" "$archive" "${meta}.bad" "${archive}.bad"
+}
+
+cache_total_bytes() {
+  local meta total=0
+  find "$(cache_format_dir)" -type f -name '*.meta' -print 2>/dev/null \
+    | while IFS= read -r meta; do
+        cache_meta_get "$meta" size || printf '0\n'
+      done \
+    | awk '{sum += $1} END {printf "%.0f\n", sum}' || true
+}
+
+cache_count_artifacts() {
+  find "$(cache_format_dir)" -type f -name '*.meta' -print 2>/dev/null | wc -l | tr -d ' ' || true
+}
+
+cache_summary() {
+  local count
+  count=$(cache_count_artifacts)
+  if [[ $count -eq 0 ]]; then
+    printf 'Cache: empty (%s)\n' "$COLAB_CACHE_DIR"
+    return 0
+  fi
+  printf 'Cache: %s artifact(s), %s (limit %s MiB, keep %s)\n' \
+    "$count" "$(human_bytes "$(cache_total_bytes)")" \
+    "${COLAB_CACHE_MAX_MB:-$COLAB_CACHE_MAX_MB_DEFAULT}" \
+    "${COLAB_CACHE_KEEP:-$COLAB_CACHE_KEEP_DEFAULT}"
+  local meta component cache_id size status
+  find "$(cache_format_dir)" -type f -name '*.meta' -print 2>/dev/null | while IFS= read -r meta; do
+    component=$(cache_meta_get "$meta" component || printf unknown)
+    cache_id=$(cache_meta_get "$meta" cache_id || printf unknown)
+    size=$(cache_meta_get "$meta" size || printf 0)
+    status=
+    if ! cache_component_enabled "$component"; then
+      status=' (disabled)'
+    fi
+    printf '  %-14s %-10s %s%s\n' "$component" "$(human_bytes "$size")" "$cache_id" "$status"
+  done || true
+}
+
+cache_prune() {
+  local keep=${COLAB_CACHE_KEEP:-$COLAB_CACHE_KEEP_DEFAULT}
+  local max_mb=${COLAB_CACHE_MAX_MB:-$COLAB_CACHE_MAX_MB_DEFAULT}
+  local max_bytes=$((max_mb * 1024 * 1024))
+  local root
+  root=$(cache_format_dir)
+  mkdir -p "$root"
+
+  # Remove interrupted captures older than an hour and artifacts without a
+  # manifest (for example after a hard kill between rename and manifest write).
+  find "$root" -type f -name '*.part.*' -mmin +60 -delete 2>/dev/null || true
+  local archive meta
+  find "$root" -type f -name '*.tar.gz' -print 2>/dev/null | while IFS= read -r archive; do
+    meta="${archive%.tar.gz}.meta"
+    if [[ ! -f $meta ]] && [[ -n $(find "$archive" -mmin +60 2>/dev/null) ]]; then
+      rm -f -- "$archive"
+    fi
+  done
+
+  # Keep the newest N artifacts per component directory.
+  local dir other epoch other_epoch newer
+  find "$root" -type f -name '*.meta' -print 2>/dev/null | while IFS= read -r meta; do
+    dir=$(dirname "$meta")
+    epoch=$(cache_meta_get "$meta" created_epoch || printf 0)
+    newer=0
+    for other in "$dir"/*.meta; do
+      [[ -f $other ]] || continue
+      [[ $other == "$meta" ]] && continue
+      other_epoch=$(cache_meta_get "$other" created_epoch || printf 0)
+      if [[ $other_epoch -gt $epoch ]] || { [[ $other_epoch -eq $epoch ]] && [[ $other > $meta ]]; }; then
+        newer=$((newer + 1))
+      fi
+    done
+    if [[ $newer -ge $keep ]]; then
+      rm -f -- "$meta" "$(cache_artifact_path "$meta")"
+    fi
+  done
+
+  # Enforce the total size budget, oldest first, while protecting the newest
+  # artifact even if it alone exceeds the configured limit.
+  local count total oldest
+  while :; do
+    count=$(cache_count_artifacts)
+    [[ $count -le 1 ]] && break
+    total=$(cache_total_bytes)
+    [[ $total -le $max_bytes ]] && break
+    oldest=$(find "$root" -type f -name '*.meta' -print 2>/dev/null \
+      | while IFS= read -r meta; do
+          printf '%s\t%s\n' "$(cache_meta_get "$meta" created_epoch || printf 0)" "$meta"
+        done \
+      | sort -n | head -n 1 | cut -f2-)
+    [[ -n $oldest ]] || break
+    rm -f -- "$oldest" "$(cache_artifact_path "$oldest")"
+  done
+}
+
+cache_remote_profile() {
+  local staging=$1
+  ssh_run "bash $COLAB_REMOTE_CACHE_HELPER profile" | tr -d '\r' | head -n 1
+}
+
+cache_remote_probe() {
+  local staging=$1
+  local component=$2
+  ssh_run "bash $COLAB_REMOTE_CACHE_HELPER probe $component" | tr -d '\r'
+}
+
+probe_value() {
+  local output=$1
+  local key=$2
+  printf '%s\n' "$output" | sed -n "s/^${key}=//p" | head -n 1
+}
+
+cache_remote_mark() {
+  local staging=$1
+  local component=$2
+  local cache_id=$3
+  ssh_run "bash $COLAB_REMOTE_CACHE_HELPER mark '$component' $(shell_quote "$cache_id")" >/dev/null 2>&1 || true
+}
+
+cache_restore_component() {
+  local staging=$1
+  local profile=$2
+  local component=$3
+  local lock_filter=${4:-}
+  local meta archive cache_id start end rc=0
+  meta=$(cache_find_meta "$profile" "$component" "$lock_filter" || true)
+  if [[ -z $meta ]]; then
+    log "No compatible cached $component for profile '$profile'."
+    return 1
+  fi
+  if ! cache_validate_artifact "$meta"; then
+    warn "Cached $component failed integrity validation; discarding it."
+    cache_discard_meta "$meta"
+    return 1
+  fi
+  archive=$(cache_artifact_path "$meta")
+  cache_id=$(cache_meta_get "$meta" cache_id || true)
+  log "Restoring cached $component ($(human_bytes "$(cache_meta_get "$meta" size || printf 0)"), $(basename "$archive"))..."
+  start=$(date +%s)
+  if ! ssh_run "bash $COLAB_REMOTE_CACHE_HELPER restore $component" < "$archive"; then
+    end=$(date +%s)
+    warn "Cached $component could not be restored after $((end - start))s; falling back to a normal install."
+    cache_discard_meta "$meta"
+    return 1
+  fi
+  end=$(date +%s)
+  if [[ $component == nvim-plugins ]]; then
+    cache_remote_mark "$staging" "$component" "$cache_id"
+  fi
+  CACHE_RESTORED_META=$meta
+  CACHE_RESTORED_COMPONENT=$component
+  CACHE_RESTORED_ID=$cache_id
+  log "Restored cached $component in $((end - start))s."
+  return 0
+}
+
+cache_capture_component() {
+  local staging=$1
+  local profile=$2
+  local component=$3
+  local cache_id=$4
+  shift 4
+  local dir archive tmp meta start end size sha
+  dir=$(cache_component_dir "$profile" "$component")
+  mkdir -p "$dir"
+  chmod 0700 "$dir" 2>/dev/null || true
+  archive="$dir/$cache_id.tar.gz"
+  tmp="$archive.part.$$"
+  meta="$dir/$cache_id.meta"
+  log "Capturing $component into the local cache..."
+  start=$(date +%s)
+  if ! ssh_run "bash $COLAB_REMOTE_CACHE_HELPER capture $component" > "$tmp"; then
+    rm -f -- "$tmp"
+    warn "Could not capture $component; the runtime is still ready."
+    return 1
+  fi
+  if ! gzip -t "$tmp" 2>/dev/null; then
+    rm -f -- "$tmp"
+    warn "Captured $component archive is not valid gzip; discarding it."
+    return 1
+  fi
+  size=$(wc -c < "$tmp" | tr -d ' ')
+  sha=$(sha256_file "$tmp" | awk '{print $1}')
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$archive"
+  cache_meta_write "$meta" \
+    format "$COLAB_CACHE_FORMAT" \
+    component "$component" \
+    profile "$profile" \
+    cache_id "$cache_id" \
+    sha256 "$sha" \
+    size "$size" \
+    created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    created_epoch "$(date +%s)" \
+    "$@"
+  end=$(date +%s)
+  log "Captured $component ($(human_bytes "$size")) in $((end - start))s."
+  cache_prune
+}
+
+cache_capture_nvim_plugins() {
+  local staging=$1
+  local profile=$2
+  local probe version remote_lock local_lock cache_id
+  probe=$(cache_remote_probe "$staging" nvim-plugins) || return 1
+  version=$(probe_value "$probe" nvim_version)
+  remote_lock=$(probe_value "$probe" lazy_lock)
+  local_lock=$(sha256_file "$COLAB_REPO_ROOT/config/nvim/lazy-lock.json" | awk '{print $1}')
+  [[ -n $version ]] || { warn 'Could not determine the remote Neovim version; skipping plugin cache capture.'; return 1; }
+  # Lazy may rewrite its own lockfile to the commit it actually installed. The
+  # artifact is keyed by the payload lock we request and validated against the
+  # installed Neovim version; the remote lock is kept for diagnostics.
+  cache_id="nvim-v$version-$local_lock"
+  cache_capture_component "$staging" "$profile" nvim-plugins "$cache_id" \
+    nvim_version "$version" lazy_lock "$local_lock" remote_lock "${remote_lock:-unknown}" \
+    files "$(probe_value "$probe" files)" bytes_raw "$(probe_value "$probe" bytes)"
+}
+
+cache_capture_shell() {
+  local staging=$1
+  local profile=$2
+  local probe version commit cache_id
+  probe=$(cache_remote_probe "$staging" shell) || return 1
+  version=$(probe_value "$probe" starship_version)
+  commit=$(probe_value "$probe" omz_commit)
+  [[ -n $version && -n $commit ]] || { warn 'Could not probe the shell tooling; skipping shell cache capture.'; return 1; }
+  cache_id="shell-starship-$version-omz-$commit"
+  cache_capture_component "$staging" "$profile" shell "$cache_id" \
+    starship_version "$version" omz_commit "$commit"
 }

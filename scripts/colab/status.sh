@@ -79,6 +79,7 @@ else
   printf 'Workspace: missing\n'
 fi
 printf 'Bootstrap: %s\n' "$(cat /root/.agent-sandbox/bootstrap-version 2>/dev/null || printf missing)"
+printf 'Cache: %s\n' "$(cat /root/.agent-sandbox/nvim-cache-key 2>/dev/null || printf none)"
 if command -v nvidia-smi >/dev/null 2>&1; then
   GPU=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -n 1 || true)
   [[ -n ${GPU:-} ]] && printf 'GPU: %s\n' "$GPU"
@@ -124,4 +125,10 @@ if [[ $MARKER == "$LOCAL_HASH" ]]; then
 else
   log "Bootstrap state: stale (remote ${MARKER:-missing}, local $LOCAL_HASH)."
   log 'Run ./scripts/colab/up.sh to refresh it.'
+fi
+printf '\n'
+if [[ ${COLAB_CACHE:-1} == 1 ]]; then
+  cache_summary
+else
+  log 'Environment cache: disabled.'
 fi

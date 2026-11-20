@@ -72,6 +72,8 @@ agent-sandbox/
 │       ├── down.sh                # Release the tracked runtime
 │       ├── save.sh                # Archive the remote workspace locally
 │       ├── restore.sh             # Restore an archive into a runtime
+│       ├── cache.sh               # Inspect, prune, invalidate, or clear the cache
+│       ├── cache-remote.sh        # Allowlisted remote cache capture/restore
 │       ├── set-gh-token.sh        # Send an optional PAT over stdin
 │       ├── bootstrap.sh           # Idempotent in-runtime installer
 │       ├── proxy.sh               # Auto-create-safe ProxyCommand guard
@@ -170,18 +172,21 @@ Prerequisites: a Google account with Colab access and a Linux or macOS client wi
 ./scripts/colab/setup.sh   # one-time local setup, dedicated key, auth check
 ./scripts/colab/up.sh      # create a CPU runtime and bootstrap the tools
 ./scripts/colab/connect.sh # interactive Zsh in ~/workspace
-./scripts/colab/status.sh  # runtime state, tools, and compute units
+./scripts/colab/status.sh  # runtime state, tools, compute units, local cache
 ./scripts/colab/save.sh    # archive the remote workspace locally
 ./scripts/colab/down.sh    # release the runtime
+./scripts/colab/cache.sh   # inspect, prune, invalidate, or clear the tool cache
 ```
 
 - CPU is the default. Request `--gpu T4`, `--tpu v5e1`, or `--high-mem` only for a new runtime. Release the current runtime before changing hardware.
 - `up.sh` reuses an existing runtime, skips a current bootstrap, never retries a failed allocation, and refuses to create a second runtime during recovery. See `docs/COLAB.md` for the exact safety rules.
+- The bootstrap installs independent components concurrently, cutting the cold bootstrap from 148 s to about 95 s in the live benchmark. A small, validated local cache of Neovim plugin data only is available with `./scripts/colab/up.sh --cache`; it is off by default because the measured restore was slower than the parallel install path on a normal Colab connection. Large npm/Node artifacts are deliberately not cached because the SSH transfer is slower than Colab's direct package downloads; see the benchmark table in `docs/COLAB.md`.
+- `up.sh --restore-workspace` restores the newest local workspace archive after the environment is ready. It replaces the live workspace only when that workspace is empty; otherwise it extracts to a new directory.
 - `connect.sh` is a normal OpenSSH session through `colab ssh --proxy-mode`; `scp`, `sftp`, tmux, and IDE remote-SSH work. Use `connect.sh -- command` for one-shot commands and `--force` to clear a stale Colab SSH session.
 - Authenticate agents interactively inside the runtime (`codex login --device-auth`, `claude`, `agy`, `opencode auth login`, `gh auth login`). Host tokens are never copied automatically. `set-gh-token.sh` can send an optional fine-grained PAT over stdin.
 - The runtime login is `root`, `/home/agent/workspace` is a compatibility path, and credentials and the workspace disappear when the runtime is released or expires. Push to Git and use `save.sh` before releasing.
 - There is no Docker-in-Docker, persistent remote filesystem, Tailscale identity, or unprivileged user in this backend. The Docker backend remains the choice for container workflows.
-- Detailed architecture, feature parity, persistence, security, configuration, and troubleshooting: [docs/COLAB.md](docs/COLAB.md).
+- Detailed architecture, cache design, feature parity, persistence, security, configuration, benchmarks, and troubleshooting: [docs/COLAB.md](docs/COLAB.md).
 
 The Docker deployment below is unchanged and does not depend on the Colab state under `.colab/`.
 

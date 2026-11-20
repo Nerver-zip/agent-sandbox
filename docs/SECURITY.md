@@ -23,6 +23,20 @@ To provide Docker capabilities to coding agents without exposing the host's Dock
 5. The embedded Docker DNS resolver may provide DNS responses. Docker's DNS proxy can have configuration-dependent behavior; do not regard DNS isolation as preventing every form of internal name or metadata discovery.
 6. `persistent/ssh/authorized_keys` (client *public* keys) and `persistent/ssh/known_hosts` are mounted read-write as user UID 10001 so authorized devices (desktop, laptop, phones) and outgoing SSH host verifications survive container recreation. They do not contain private keys.
 
+## Google Colab backend trust boundary
+
+The optional Colab backend is a separate trust zone from the Docker deployment. It runs on a managed Google VM reached through the official Colab CLI's WebSocket SSH proxy. It does not use the host Docker daemon, the Docker bridge, the host firewall rules, or the Docker credential mounts described above.
+
+- The runtime login is `root` because that is the only SSH identity Colab exposes. The unprivileged UID 10001 boundary of the Docker backend cannot be reproduced. Any process running in the runtime can read the workspace and every credential stored on that runtime.
+- A dedicated Ed25519 client key is generated under `.colab/ssh/` with mode `0600`. It is not the user's personal SSH key and is ignored by Git.
+- Local OAuth tokens, `persistent/codex`, `persistent/claude`, and `persistent/gh` are never copied to the runtime. Codex, Claude Code, Antigravity, OpenCode, and GitHub CLI authenticate interactively inside the runtime.
+- `set-gh-token.sh` is an explicit opt-in path for a fine-grained GitHub PAT. It sends the token over SSH stdin, never through argv, and stores it only on the disposable runtime. The token disappears with the runtime; revoke it in GitHub if the runtime is compromised.
+- The outer transport is a TLS-authenticated WebSocket to Google. The inner SSH host key is ephemeral and is deliberately not pinned; the generated config disables known-hosts verification for that one alias. Do not reuse the generated config for other hosts.
+- The runtime has public internet egress. There is no domain allowlist, traffic inspection, or network isolation comparable to the Docker firewall. Treat the runtime as less trusted than the local machine and avoid placing long-lived high-value secrets in it.
+- The remote workspace is ephemeral. Git pushes and `save.sh` archives are the persistence mechanisms. Local archives can contain secrets and are created with mode `0600`; `backups/` is ignored by Git.
+- Docker-in-Docker is not supported. A second Docker daemon would require privileged capabilities or a rootless configuration that Colab does not guarantee, and would increase the hosted VM's attack surface.
+- Colab may reclaim the runtime after inactivity or at its maximum lifetime. The scripts do not add artificial activity or keepalive mechanisms; `save.sh` and Git are the recovery path.
+
 ## Limits and known risks
 
 - Docker shares the host's Linux kernel; a container escape vulnerability could break isolation. For genuinely untrusted code, use a VM/microVM with separate Tailscale identity and egress controls, ideally on a separate host or VLAN.

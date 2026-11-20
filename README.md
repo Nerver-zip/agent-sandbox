@@ -19,6 +19,7 @@ This setup does not provide virtual machine isolation or protect against kernel 
 | Network access | OpenSSH service listening on the host Tailscale address at port 2222 with public-key authentication |
 | Isolation controls | Dedicated Docker bridge, host firewall rules, unprivileged user, and resource limits (CPU, memory, PIDs) |
 | Persistent state | Server host key, client `authorized_keys`, `known_hosts`, Codex `auth.json`, Claude `.credentials.json`, GitHub PAT, and Git config |
+| Google Colab backend | Optional official-CLI provisioned CPU/GPU/TPU runtime with the same toolchain, no Docker required |
 
 Install a Nerd Font on your terminal emulator to display the Starship prompt symbols correctly.
 
@@ -62,11 +63,27 @@ agent-sandbox/
 │   ├── import-git-config.sh       # Script to import Git author identity (.gitconfig or name/email)
 │   ├── reset-git-config.sh        # Script to reset stored Git author identity
 │   ├── install-packages.sh        # Temporary package installation helper
-│   └── container-entrypoint.sh    # Container initialization and Docker socket bridge
+│   ├── container-entrypoint.sh    # Container initialization and Docker socket bridge
+│   └── colab/                     # Optional Google Colab backend
+│       ├── setup.sh               # Local CLI/key/config setup
+│       ├── up.sh                  # Provision and bootstrap one runtime
+│       ├── connect.sh             # OpenSSH session through the Colab proxy
+│       ├── status.sh              # Runtime, bootstrap, and compute-unit status
+│       ├── down.sh                # Release the tracked runtime
+│       ├── save.sh                # Archive the remote workspace locally
+│       ├── restore.sh             # Restore an archive into a runtime
+│       ├── set-gh-token.sh        # Send an optional PAT over stdin
+│       ├── bootstrap.sh           # Idempotent in-runtime installer
+│       ├── proxy.sh               # Auto-create-safe ProxyCommand guard
+│       └── _common.sh             # Shared shell helpers
 ├── docs/
 │   ├── SECURITY.md                # Security boundaries, firewall behavior, and risks
+│   ├── COLAB.md                   # Colab architecture, parity, persistence, and troubleshooting
 │   └── agent-sandbox.service.example
-├── tests/test_project.py          # Static contract tests
+├── tests/
+│   ├── test_project.py            # Static Docker contract tests
+│   ├── test_codex_auth_storage.py # Codex credential storage regressions
+│   └── test_colab.py              # Colab lifecycle and command-construction tests
 ├── ssh/authorized_keys            # Build-stage public keys
 ├── persistent/                    # Host-persisted files mounted at runtime
 │   ├── ssh/ssh_host_ed25519_key[.pub]  # Server host keypair
@@ -77,6 +94,8 @@ agent-sandbox/
 │   ├── claude/.credentials.json   # Claude Code OAuth credentials
 │   ├── gh/token                   # GitHub personal access token
 │   └── git/config                 # Git user configuration (name and email)
+├── .colab/                        # Local Colab state; ignored and never committed
+├── backups/                       # Local Colab workspace archives; ignored
 └── .env                           # Local deployment variables
 ```
 
@@ -140,6 +159,31 @@ Host agents
 ```
 
 You can then run `ssh homelab` or `ssh agents`. The host and container maintain separate SSH server host keys. On first connection, check the fingerprint against `ssh-keygen -lf persistent/ssh/ssh_host_ed25519_key.pub` on the host.
+
+## Google Colab backend
+
+An optional backend provisions a disposable Google Colab runtime and installs the same toolchain there. It is independent of the Docker deployment and requires no Docker, Tailscale, inbound port, or privileged container. The runtime is addressed through the official Colab CLI's WebSocket SSH proxy.
+
+Prerequisites: a Google account with Colab access and a Linux or macOS client with OpenSSH and Git. `setup.sh` installs `google-colab-cli` with `uv` or `pipx` when it is missing.
+
+```bash
+./scripts/colab/setup.sh   # one-time local setup, dedicated key, auth check
+./scripts/colab/up.sh      # create a CPU runtime and bootstrap the tools
+./scripts/colab/connect.sh # interactive Zsh in ~/workspace
+./scripts/colab/status.sh  # runtime state, tools, and compute units
+./scripts/colab/save.sh    # archive the remote workspace locally
+./scripts/colab/down.sh    # release the runtime
+```
+
+- CPU is the default. Request `--gpu T4`, `--tpu v5e1`, or `--high-mem` only for a new runtime. Release the current runtime before changing hardware.
+- `up.sh` reuses an existing runtime, skips a current bootstrap, never retries a failed allocation, and refuses to create a second runtime during recovery. See `docs/COLAB.md` for the exact safety rules.
+- `connect.sh` is a normal OpenSSH session through `colab ssh --proxy-mode`; `scp`, `sftp`, tmux, and IDE remote-SSH work. Use `connect.sh -- command` for one-shot commands and `--force` to clear a stale Colab SSH session.
+- Authenticate agents interactively inside the runtime (`codex login --device-auth`, `claude`, `agy`, `opencode auth login`, `gh auth login`). Host tokens are never copied automatically. `set-gh-token.sh` can send an optional fine-grained PAT over stdin.
+- The runtime login is `root`, `/home/agent/workspace` is a compatibility path, and credentials and the workspace disappear when the runtime is released or expires. Push to Git and use `save.sh` before releasing.
+- There is no Docker-in-Docker, persistent remote filesystem, Tailscale identity, or unprivileged user in this backend. The Docker backend remains the choice for container workflows.
+- Detailed architecture, feature parity, persistence, security, configuration, and troubleshooting: [docs/COLAB.md](docs/COLAB.md).
+
+The Docker deployment below is unchanged and does not depend on the Colab state under `.colab/`.
 
 ## Daily usage
 
@@ -389,6 +433,7 @@ Common issues:
 - Credential errors: Check the Codex store with `docker compose exec --user agent workspace stat -c '%u:%a' /home/agent/.codex-auth /home/agent/.codex-auth/auth.json /home/agent/.codex-auth/auth.lock` (expected: `10001:700`, `10001:600`, and `10001:600`).
 - Missing icons in prompt: Select a Nerd Font in your terminal emulator settings.
 - Build failures: Check outbound network access to npm and the Antigravity installation endpoints.
+- Colab backend: Run `./scripts/colab/status.sh` first, then see the troubleshooting section in [docs/COLAB.md](docs/COLAB.md#troubleshooting).
 
 To run the static test suite:
 
@@ -409,6 +454,7 @@ Containers share the host kernel. For untrusted code execution requiring strong 
 ## References
 
 - [Docker firewall and DOCKER-USER](https://docs.docker.com/engine/network/firewall-iptables/)
+- [Google Colab CLI](https://github.com/googlecolab/google-colab-cli)
 - [OpenAI Codex CLI](https://github.com/openai/codex)
 - [Google Antigravity CLI installation](https://antigravity.google/docs/cli/install/)
 - [GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login) and [fine-grained PAT permissions](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)

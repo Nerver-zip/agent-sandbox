@@ -5,3 +5,5 @@ ssh/authorized_keys
 *.zip
 __pycache__/
 .pytest_cache/
+.colab/
+backups/

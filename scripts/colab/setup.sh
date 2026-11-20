@@ -124,6 +124,10 @@ fi
 : "${COLAB_AGY_INSTALL:=1}"
 : "${COLAB_SSH_WAIT_ATTEMPTS:=30}"
 : "${COLAB_SSH_WAIT_SECONDS:=2}"
+: "${COLAB_CACHE:=0}"
+: "${COLAB_CACHE_KEEP:=$COLAB_CACHE_KEEP_DEFAULT}"
+: "${COLAB_CACHE_MAX_MB:=$COLAB_CACHE_MAX_MB_DEFAULT}"
+: "${COLAB_CACHE_COMPONENTS:=nvim-plugins}"
 validate_session_name "$COLAB_SESSION"
 
 if [[ -z $COLAB_CODEX_VERSION && -f $COLAB_REPO_ROOT/.env ]]; then
@@ -208,6 +212,10 @@ config_set COLAB_OPENCODE_VERSION "$COLAB_OPENCODE_VERSION"
 config_set COLAB_AGY_INSTALL "$COLAB_AGY_INSTALL"
 config_set COLAB_SSH_WAIT_ATTEMPTS "$COLAB_SSH_WAIT_ATTEMPTS"
 config_set COLAB_SSH_WAIT_SECONDS "$COLAB_SSH_WAIT_SECONDS"
+config_set COLAB_CACHE "$COLAB_CACHE"
+config_set COLAB_CACHE_KEEP "$COLAB_CACHE_KEEP"
+config_set COLAB_CACHE_MAX_MB "$COLAB_CACHE_MAX_MB"
+config_set COLAB_CACHE_COMPONENTS "$COLAB_CACHE_COMPONENTS"
 
 # Reload the normalized configuration and generate the SSH alias immediately.
 load_config
@@ -242,4 +250,5 @@ Next:
   ./scripts/colab/down.sh        # release the runtime
 
 Optional accelerators: ./scripts/colab/up.sh --gpu T4 (or --tpu v5e1)
+Optional tool cache:  ./scripts/colab/up.sh --cache (off by default; see docs)
 TEXT

@@ -1,5 +1,7 @@
-# Persist auth.json through the entrypoint symlink into the isolated credential directory.
-# Config, history, sessions, caches, and workspace stay in ephemeral CODEX_HOME.
+# Codex stores its credential document in CODEX_HOME. The Docker backend persists
+# only auth.json through a narrow directory mount; the Colab backend keeps every
+# runtime credential ephemeral. Config, history, sessions, caches, and workspace
+# are disposable in both backends.
 cli_auth_credentials_store = "file"
 
 # Desktop notification on the SSH client when a turn ends.

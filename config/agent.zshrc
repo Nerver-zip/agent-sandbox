@@ -8,7 +8,8 @@ export PATH="$HOME/.local/bin:$HOME/.local/bin/scripts:$HOME/.npm-global/bin:/us
 export EDITOR=nvim VISUAL=nvim
 export CODEX_HOME="$HOME/.codex"
 export STARSHIP_CONFIG="$HOME/.config/starship/starship.toml"
-export DOCKER_HOST="${DOCKER_HOST:-tcp://dind:2375}"
+# The Docker backend supplies DOCKER_HOST from compose.yaml. Colab has no DinD sidecar.
+if [[ -n "${DOCKER_HOST:-}" ]]; then export DOCKER_HOST; fi
 export ZSH=/opt/oh-my-zsh
 ZSH_THEME=""   # Starship provides the prompt.
 zstyle ':omz:update' mode disabled
@@ -23,6 +24,11 @@ alias ls='eza --icons --color=auto --group-directories-first'
 alias ll='eza -l --icons --color=auto --group-directories-first'
 alias la='eza -la --icons --color=auto --group-directories-first'
 alias v='nvim'
+
+# Start in the familiar workspace on backends whose login directory is elsewhere.
+if [[ -o interactive && -d "$HOME/workspace" && "$PWD" == "$HOME" ]]; then
+  cd "$HOME/workspace"
+fi
 
 if [[ -o interactive ]]; then
   eval "$(starship init zsh)"

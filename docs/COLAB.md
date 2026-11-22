@@ -489,9 +489,9 @@ maximum lifetime. `status.sh` and `up.sh` detect a missing assignment, but any
 unsaved workspace data is gone. Push or `save.sh` frequently.
 
 SSH session limit: Colab allows a small number of concurrent SSH sessions. A
-stale client can cause HTTP 429. `connect.sh --force` kills stale sessions on
-this runtime before connecting. Use it only when you are sure no other client
-is active.
+stale local client can cause HTTP 429. `connect.sh --force` terminates stale
+local `colab ssh --proxy-mode` processes for this session before connecting. It
+cannot disconnect a client running on another machine; close that client first.
 
 ## Monitoring compute units
 
@@ -589,8 +589,11 @@ The runtime predates SSH support or was created without it. Release it with
 
 ### SSH returns 429 or `already-active-session`
 
-The runtime's concurrent SSH limit is exhausted, often by a dead client. Close
-the other client, or run `./scripts/colab/connect.sh --force`.
+The runtime's concurrent SSH limit is exhausted, often by a dead local proxy.
+Close clients running on other machines. If the stale client was local, run
+`./scripts/colab/connect.sh --force`; it terminates local `colab ssh --proxy-mode`
+processes for this session. If the limit is still exhausted, release the runtime
+with `./scripts/colab/down.sh` and create a new one.
 
 ### `up.sh` stops during bootstrap
 

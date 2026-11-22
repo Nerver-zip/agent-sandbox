@@ -113,7 +113,7 @@ check agy agy --version
 REMOTE
 ); then
   warn 'The runtime is listed but the SSH health check failed. It may still be starting or the SSH session limit may be exhausted.'
-  warn 'Try ./scripts/colab/connect.sh --force, or ./scripts/colab/down.sh to release it.'
+  warn 'Try ./scripts/colab/connect.sh --force (clears local stale proxies), close another client, or ./scripts/colab/down.sh to release it.'
   exit 1
 fi
 

@@ -15,7 +15,7 @@ usage() {
 Usage: ./scripts/colab/connect.sh [options] [-- command [args...]]
 
 Options:
-  --force     Kill stale SSH sessions on the runtime before connecting
+  --force     Clear stale local Colab SSH proxy processes before connecting
   -v, --verbose
               Show the local ssh command details
   -h, --help  Show this help
@@ -40,13 +40,8 @@ done
 
 load_config
 require_existing_session
+[[ $FORCE -eq 1 ]] && clear_stale_ssh_proxies
 write_ssh_config
-
-HOST=$COLAB_HOST
-if [[ $FORCE -eq 1 ]]; then
-  HOST=$COLAB_FORCE_HOST
-  warn 'Forcing a connection; stale SSH sessions on the runtime will be terminated.'
-fi
 
 SSH_ARGS=(-F "$COLAB_SSH_CONFIG" -o ConnectTimeout=15)
 if [[ $VERBOSE -eq 1 ]]; then
@@ -54,6 +49,6 @@ if [[ $VERBOSE -eq 1 ]]; then
 fi
 
 if [[ ${#COMMAND[@]} -gt 0 ]]; then
-  exec ssh "${SSH_ARGS[@]}" "$HOST" "${COMMAND[@]}"
+  exec ssh "${SSH_ARGS[@]}" "$COLAB_HOST" "${COMMAND[@]}"
 fi
-exec ssh "${SSH_ARGS[@]}" "$HOST"
+exec ssh "${SSH_ARGS[@]}" "$COLAB_HOST"

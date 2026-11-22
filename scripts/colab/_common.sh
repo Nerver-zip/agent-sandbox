@@ -17,7 +17,6 @@ COLAB_CACHE_KEEP_DEFAULT=2
 COLAB_CACHE_MAX_MB_DEFAULT=1024
 
 COLAB_HOST="agent-sandbox-colab"
-COLAB_FORCE_HOST="agent-sandbox-colab-force"
 COLAB_STATE_DIR="/root/.agent-sandbox"
 COLAB_REMOTE_MARKER="$COLAB_STATE_DIR/bootstrap-version"
 COLAB_REMOTE_STAGE="/tmp/agent-sandbox-bootstrap"
@@ -341,10 +340,8 @@ clear_runtime_metadata() {
 }
 
 proxy_command_string() {
-  local force=$1
   build_colab_argv
   local args=("${COLAB_ARGV[@]}" ssh --proxy-mode -s "$COLAB_SESSION" --identity "$COLAB_SSH_KEY")
-  [[ $force -eq 1 ]] && args+=(--force)
   local out=
   local arg
   for arg in "${args[@]}"; do
@@ -368,22 +365,7 @@ write_ssh_config() {
     printf '    IdentityFile "%s"\n' "$COLAB_SSH_KEY"
     printf '%s\n' '    IdentitiesOnly yes'
     printf '%s\n' '    PreferredAuthentications publickey'
-    printf '    ProxyCommand %s\n' "$(proxy_command_string 0)"
-    printf '%s\n' '    StrictHostKeyChecking no'
-    printf '%s\n' '    UserKnownHostsFile /dev/null'
-    printf '%s\n' '    GlobalKnownHostsFile /dev/null'
-    printf '%s\n' '    LogLevel ERROR'
-    printf '%s\n' '    ConnectTimeout 10'
-    printf '%s\n' '    ForwardAgent no'
-    printf '%s\n' '    ForwardX11 no'
-    printf '\n'
-    printf '%s\n' "Host $COLAB_FORCE_HOST"
-    printf '    HostName %s\n' 'colab-runtime'
-    printf '%s\n' '    User root'
-    printf '    IdentityFile "%s"\n' "$COLAB_SSH_KEY"
-    printf '%s\n' '    IdentitiesOnly yes'
-    printf '%s\n' '    PreferredAuthentications publickey'
-    printf '    ProxyCommand %s\n' "$(proxy_command_string 1)"
+    printf '    ProxyCommand %s\n' "$(proxy_command_string)"
     printf '%s\n' '    StrictHostKeyChecking no'
     printf '%s\n' '    UserKnownHostsFile /dev/null'
     printf '%s\n' '    GlobalKnownHostsFile /dev/null'
@@ -398,6 +380,51 @@ write_ssh_config() {
 
 ssh_run() {
   ssh -T -F "$COLAB_SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 "$COLAB_HOST" "$@"
+}
+
+list_stale_ssh_proxies() {
+  local uid
+  uid=$(id -u 2>/dev/null || true)
+  ps -A -o uid= -o pid= -o args= 2>/dev/null | awk -v uid="$uid" -v session="$COLAB_SESSION" '
+    {
+      if (uid != "" && $1 != uid) next
+      pid = $2
+      proxy = 0
+      target = 0
+      for (i = 3; i <= NF; i++) {
+        if ($i == "--proxy-mode") proxy = 1
+        if ($i == "-s" && $(i + 1) == session) target = 1
+      }
+      if (proxy && target) print pid
+    }'
+}
+
+clear_stale_ssh_proxies() {
+  local pids pid_list waited=0
+  pids=$(list_stale_ssh_proxies)
+  if [[ -z $pids ]]; then
+    log 'No stale local Colab SSH proxy processes found.'
+    return 0
+  fi
+
+  pid_list=$(printf '%s\n' "$pids" | tr '\n' ' ')
+  log "Terminating stale local Colab SSH proxy process(es): ${pid_list% }"
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+
+  while [[ $waited -lt 5 ]]; do
+    [[ -z $(list_stale_ssh_proxies) ]] && return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  pids=$(list_stale_ssh_proxies)
+  [[ -n $pids ]] || return 0
+  warn 'Stale Colab SSH proxy processes did not exit; sending SIGKILL.'
+  # shellcheck disable=SC2086
+  kill -KILL $pids 2>/dev/null || true
+  sleep 1
+  [[ -z $(list_stale_ssh_proxies) ]] || warn 'Some stale Colab SSH proxy processes are still running.'
 }
 
 wait_for_ssh() {

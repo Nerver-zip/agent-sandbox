@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
@@ -521,10 +522,9 @@ class ColabScriptTests(unittest.TestCase):
         self.assertIn("COLAB_CACHE_COMPONENTS=nvim-plugins", text)
         ssh_config = (colab_dir / "ssh" / "config").read_text()
         self.assertIn("Host agent-sandbox-colab", ssh_config)
-        self.assertIn("Host agent-sandbox-colab-force", ssh_config)
+        self.assertNotIn("agent-sandbox-colab-force", ssh_config)
         self.assertIn("--proxy-mode", ssh_config)
-        self.assertIn("agent-sandbox-colab-force", ssh_config)
-        self.assertIn("--force", ssh_config)
+        self.assertNotIn("--force", ssh_config)
         self.assertNotIn("id_rsa", self.config_text())
 
     def test_up_provisions_one_cpu_runtime_and_bootstraps(self):
@@ -611,7 +611,7 @@ class ColabScriptTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.colab_calls() if call and call[0] == "new"]), 1)
         self.assertIn("still active", result.stderr)
 
-    def test_connect_requires_runtime_and_force_selects_force_host(self):
+    def test_connect_requires_runtime_and_force_clears_local_proxies(self):
         result = self.run_script("connect.sh", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual([call for call in self.colab_calls() if call and call[0] == "new"], [])
@@ -620,10 +620,35 @@ class ColabScriptTests(unittest.TestCase):
         self.run_script("connect.sh")
         calls = self.ssh_calls()
         self.assertEqual(calls[-1]["host"], "agent-sandbox-colab")
-        self.run_script("connect.sh", "--force")
-        self.assertEqual(self.ssh_calls()[-1]["host"], "agent-sandbox-colab-force")
+        result = self.run_script("connect.sh", "--force")
+        self.assertIn("No stale local Colab SSH proxy processes found.", result.stdout)
+        self.assertEqual(self.ssh_calls()[-1]["host"], "agent-sandbox-colab")
         self.run_script("connect.sh", "--", "echo", "hello")
         self.assertEqual(self.ssh_calls()[-1]["command"], "echo hello")
+
+    def test_connect_force_terminates_a_stale_local_proxy(self):
+        self.run_script("up.sh")
+        self.clear_calls()
+        stale = subprocess.Popen([
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+            "ssh",
+            "--proxy-mode",
+            "-s",
+            "agent-sandbox",
+            "--identity",
+            "/nonexistent",
+        ])
+        try:
+            result = self.run_script("connect.sh", "--force")
+            self.assertIn("Terminating stale local Colab SSH proxy", result.stdout)
+            stale.wait(timeout=5)
+            self.assertIsNotNone(stale.returncode)
+        finally:
+            if stale.poll() is None:
+                stale.kill()
+                stale.wait()
 
     def test_proxy_refuses_to_auto_create(self):
         self.clear_calls()

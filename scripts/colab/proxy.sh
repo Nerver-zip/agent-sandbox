@@ -7,11 +7,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=scripts/colab/_common.sh
 source "$SCRIPT_DIR/_common.sh"
 
-FORCE=0
-if [[ ${1:-} == --force ]]; then
-  FORCE=1
-elif [[ $# -gt 0 ]]; then
-  die "proxy.sh takes only --force, got: $1"
+if [[ $# -gt 0 ]]; then
+  die "proxy.sh takes no arguments, got: $1"
 fi
 
 load_config
@@ -28,7 +25,4 @@ esac
 
 build_colab_argv
 PROXY_ARGV=("${COLAB_ARGV[@]}" ssh --proxy-mode -s "$COLAB_SESSION" --identity "$COLAB_SSH_KEY")
-if [[ $FORCE -eq 1 ]]; then
-  PROXY_ARGV+=(--force)
-fi
 exec "${PROXY_ARGV[@]}"

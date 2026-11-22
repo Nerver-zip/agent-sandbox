@@ -89,6 +89,9 @@ The client does not need Docker, Tailscale, sudo, or an inbound port.
 # Archive the complete remote workspace locally.
 ./scripts/colab/save.sh
 
+# Run this repository's static test suite on the runtime.
+./scripts/colab/test.sh
+
 # Release the runtime (prompts unless --yes is passed).
 ./scripts/colab/down.sh
 ```
@@ -147,6 +150,7 @@ claude --version
 agy --version
 opencode --version
 gh --version
+gitleaks version
 tmux new -s agents
 ```
 
@@ -189,6 +193,20 @@ send a short-lived fine-grained PAT over an encrypted SSH stdin pipe:
 The PAT is never stored locally by that script. It is written only to the
 disposable runtime's `gh` configuration and disappears with the runtime. Use
 `gh auth setup-git` (called by the script) so Git uses the credential helper.
+
+### Secret scanning
+
+The bootstrap installs a pinned `gitleaks` release with checksum verification.
+Scan committed history or the working tree before pushing:
+
+```bash
+gitleaks git ~/workspace --redact -v
+gitleaks dir ~/workspace --redact -v
+```
+
+`gitleaks` exits non-zero when it finds a secret, so it can gate a push or a
+script. The default rules are used; add a `.gitleaks.toml` to the repository to
+customize them.
 
 ### Saving work
 
@@ -405,6 +423,7 @@ archives and from agent credentials.
 | Antigravity CLI (`agy`) | Yes | Yes, official installer (best effort) |
 | OpenCode | Yes | Yes, installed by bootstrap |
 | Git + GitHub CLI | Yes | Yes, interactive `gh` login or PAT |
+| Secret scanning (`gitleaks`) | No | Yes, pinned release with checksum verification |
 | Neovim + shared config | Yes | Yes, current Neovim from upstream |
 | Zsh + Oh My Zsh + Starship | Yes | Yes |
 | tmux | Yes | Yes |
@@ -536,6 +555,7 @@ can be overridden by exporting them before a command:
 | `COLAB_CLAUDE_VERSION` | `latest` | npm version for Claude Code |
 | `COLAB_OPENCODE_VERSION` | `latest` | npm version for OpenCode |
 | `COLAB_AGY_INSTALL` | `1` | Install Antigravity CLI |
+| `COLAB_GITLEAKS_VERSION` | `8.30.1` | Pinned gitleaks release |
 | `COLAB_SSH_WAIT_ATTEMPTS` | `30` | SSH readiness attempts |
 | `COLAB_SSH_WAIT_SECONDS` | `2` | Delay between attempts |
 | `COLAB_CACHE` | `0` | Enable local environment cache restore/capture |
@@ -638,7 +658,11 @@ Google account:
 
 ```bash
 python3 -m unittest discover -s tests -v
+./scripts/colab/test.sh
 ```
+
+The first command runs locally. The second copies the repository (without local
+credentials) to the active runtime and runs the same suite there.
 
 A real CPU-runtime smoke test (requires authenticated Colab access and consumes
 a small amount of compute units) is:
@@ -648,11 +672,12 @@ a small amount of compute units) is:
 ./scripts/colab/up.sh --benchmark
 ./scripts/colab/connect.sh -- 'set -e
   cd ~/workspace
-  command -v zsh tmux nvim starship eza gh codex claude opencode node python3 cmake
+  command -v zsh tmux nvim starship eza gh gitleaks codex claude opencode node python3 cmake
   codex --version
   claude --version
   opencode --version
   gh --version
+  gitleaks version
   nvim --version | head -n 1
   git config --global user.name
   test -d ~/workspace'
@@ -687,6 +712,9 @@ Verified in this repository's development environment:
   tools validated: Codex 0.171.0, Claude Code 2.1.329, OpenCode 1.19.6,
   Antigravity 1.5.5, GitHub CLI 2.103.2, Neovim 0.12.6, Node 22.23.5,
   Zsh 5.9, tmux 3.4, Starship 1.27.0, eza, Fastfetch, Python 3.13, CMake.
+- The gitleaks bootstrap path was verified live on 2026-11-21: gitleaks 8.30.1
+  was installed with checksum verification and reported by `up.sh --benchmark`
+  and `status.sh`.
 - The optional Neovim cache measured **18.0 MiB**, captured in 5-7 s and restored
   in 10-15 s. A cold cached run totaled **144 s** (14 s allocation/SSH, 15 s
   restore, 97 s bootstrap), slower than the 120 s no-cache run, which is why the

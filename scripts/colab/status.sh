@@ -105,6 +105,7 @@ check python3 python3 --version
 check git git --version
 check cmake cmake --version
 check gh gh --version
+check gitleaks gitleaks version
 check codex codex --version
 check claude claude --version
 check opencode opencode --version

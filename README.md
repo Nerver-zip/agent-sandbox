@@ -16,6 +16,7 @@ This setup does not provide virtual machine isolation or protect against kernel 
 | Docker runtime | Docker CLI, Compose v2, and Buildx connected to an isolated Docker-in-Docker (`dind`) sidecar |
 | Agent CLIs | [Codex CLI](https://github.com/openai/codex) (`codex`), [Claude Code](https://github.com/anthropics/claude-code) (`claude`), [Antigravity CLI](https://antigravity.google/docs/cli/install/) (`agy`), and [OpenCode](https://opencode.ai/) (`opencode`) built into the image |
 | GitHub integration | GitHub CLI (`gh`), optional fine-grained PAT mounted read-only, and HTTPS Git credential helper |
+| Secret scanning | Pinned [gitleaks](https://github.com/gitleaks/gitleaks) release with checksum verification in the Colab bootstrap |
 | Network access | OpenSSH service listening on the host Tailscale address at port 2222 with public-key authentication |
 | Isolation controls | Dedicated Docker bridge, host firewall rules, unprivileged user, and resource limits (CPU, memory, PIDs) |
 | Persistent state | Server host key, client `authorized_keys`, `known_hosts`, Codex `auth.json`, Claude `.credentials.json`, GitHub PAT, and Git config |
@@ -174,6 +175,7 @@ Prerequisites: a Google account with Colab access and a Linux or macOS client wi
 ./scripts/colab/connect.sh # interactive Zsh in ~/workspace
 ./scripts/colab/status.sh  # runtime state, tools, compute units, local cache
 ./scripts/colab/save.sh    # archive the remote workspace locally
+./scripts/colab/test.sh    # run this repository's test suite on the runtime
 ./scripts/colab/down.sh    # release the runtime
 ./scripts/colab/cache.sh   # inspect, prune, invalidate, or clear the tool cache
 ```

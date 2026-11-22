@@ -134,6 +134,7 @@ load_config() {
   : "${COLAB_CLAUDE_VERSION:=latest}"
   : "${COLAB_OPENCODE_VERSION:=latest}"
   : "${COLAB_AGY_INSTALL:=1}"
+  : "${COLAB_GITLEAKS_VERSION:=8.30.1}"
   : "${COLAB_SSH_WAIT_ATTEMPTS:=30}"
   : "${COLAB_SSH_WAIT_SECONDS:=2}"
   : "${COLAB_CLI:=}"
@@ -174,8 +175,8 @@ load_config() {
   [[ -z $COLAB_ENDPOINT || $COLAB_ENDPOINT =~ ^[A-Za-z0-9._-]+$ ]] || die 'COLAB_ENDPOINT has an invalid value.'
   [[ -z $COLAB_ACCELERATOR || $COLAB_ACCELERATOR =~ ^[A-Za-z0-9]+$ ]] || die 'COLAB_ACCELERATOR has an invalid value.'
   [[ -z $COLAB_TPU || $COLAB_TPU =~ ^[A-Za-z0-9]+$ ]] || die 'COLAB_TPU has an invalid value.'
-  for value in "$COLAB_CODEX_VERSION" "$COLAB_CLAUDE_VERSION" "$COLAB_OPENCODE_VERSION"; do
-    [[ $value =~ ^[A-Za-z0-9._@/-]+$ ]] || die 'Agent version values may only contain letters, digits, dot, dash, slash, underscore or @.'
+  for value in "$COLAB_CODEX_VERSION" "$COLAB_CLAUDE_VERSION" "$COLAB_OPENCODE_VERSION" "$COLAB_GITLEAKS_VERSION"; do
+    [[ $value =~ ^[A-Za-z0-9._@/-]+$ ]] || die 'Version values may only contain letters, digits, dot, dash, slash, underscore or @.'
   done
   [[ $COLAB_WORKSPACE =~ ^/[A-Za-z0-9._/-]+$ ]] || die 'COLAB_WORKSPACE must be an absolute path without spaces or shell metacharacters.'
   [[ $COLAB_WORKSPACE != *..* ]] || die 'COLAB_WORKSPACE must not contain "..".'
@@ -468,8 +469,8 @@ payload_hash() {
       [[ -f $file ]] || continue
       printf '%s  %s\n' "$(sha256_file "$file" | awk '{print $1}')" "$file"
     done
-    printf 'CODEX_VERSION=%s\nCLAUDE_VERSION=%s\nOPENCODE_VERSION=%s\nAGY_INSTALL=%s\n' \
-      "$COLAB_CODEX_VERSION" "$COLAB_CLAUDE_VERSION" "$COLAB_OPENCODE_VERSION" "$COLAB_AGY_INSTALL"
+    printf 'CODEX_VERSION=%s\nCLAUDE_VERSION=%s\nOPENCODE_VERSION=%s\nAGY_INSTALL=%s\nGITLEAKS_VERSION=%s\n' \
+      "$COLAB_CODEX_VERSION" "$COLAB_CLAUDE_VERSION" "$COLAB_OPENCODE_VERSION" "$COLAB_AGY_INSTALL" "$COLAB_GITLEAKS_VERSION"
   ) | sha256_stdin | awk '{print $1}'
 }
 
@@ -489,6 +490,7 @@ make_payload() {
     printf 'CLAUDE_VERSION=%q\n' "$COLAB_CLAUDE_VERSION"
     printf 'OPENCODE_VERSION=%q\n' "$COLAB_OPENCODE_VERSION"
     printf 'AGY_INSTALL=%q\n' "$COLAB_AGY_INSTALL"
+    printf 'GITLEAKS_VERSION=%q\n' "$COLAB_GITLEAKS_VERSION"
   } > "$staging/payload/env"
   chmod 0644 "$staging/payload/env" "$staging/payload/bootstrap.sh" \
     "$staging/payload/cache-remote.sh" "$staging/payload/agent-notify.sh"

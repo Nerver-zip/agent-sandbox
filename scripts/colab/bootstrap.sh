@@ -60,6 +60,7 @@ fi
 : "${CLAUDE_VERSION:=latest}"
 : "${OPENCODE_VERSION:=latest}"
 : "${AGY_INSTALL:=1}"
+: "${GITLEAKS_VERSION:=8.30.1}"
 
 AGENT_PREFIX_BASE=/opt/agent-sandbox/agents
 CORE_PACKAGES=(
@@ -401,6 +402,44 @@ gh_fallback_task() {
   fi
 }
 
+install_gitleaks_task() {
+  local version=${GITLEAKS_VERSION#v}
+  if command -v gitleaks >/dev/null 2>&1; then
+    local current
+    current=$(gitleaks version 2>/dev/null | head -n 1 || true)
+    if [[ $current == "$version" ]]; then
+      printf '[bootstrap] gitleaks is already current: %s\n' "$current"
+      return 0
+    fi
+  fi
+
+  printf '[bootstrap] installing gitleaks %s\n' "$version"
+  local tmp tag asset checksums
+  tmp=$(mktemp -d)
+  tag="v$version"
+  asset="gitleaks_${version}_linux_x64.tar.gz"
+  checksums="gitleaks_${version}_checksums.txt"
+  if ! fetch "https://github.com/gitleaks/gitleaks/releases/download/$tag/$asset" "$tmp/$asset" \
+    || ! fetch "https://github.com/gitleaks/gitleaks/releases/download/$tag/$checksums" "$tmp/$checksums"; then
+    printf '[bootstrap] ERROR: gitleaks download failed\n' >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! (cd "$tmp" && grep -F "  $asset" "$checksums" | sha256sum -c -); then
+    printf '[bootstrap] ERROR: gitleaks checksum verification failed\n' >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! tar -xzf "$tmp/$asset" -C "$tmp" gitleaks; then
+    printf '[bootstrap] ERROR: could not extract gitleaks\n' >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  install -m 0755 "$tmp/gitleaks" /usr/local/bin/gitleaks
+  rm -rf "$tmp"
+  command -v gitleaks >/dev/null 2>&1
+}
+
 nvim_cache_key() {
   command -v nvim >/dev/null 2>&1 || return 1
   local version lock
@@ -447,7 +486,7 @@ validate_runtime() {
   }
   local MISSING=()
   local binary version
-  for binary in zsh git gh nvim tmux starship eza codex claude opencode node npm python3 cmake; do
+  for binary in zsh git gh nvim tmux starship eza codex claude opencode node npm python3 cmake gitleaks; do
     if command -v "$binary" >/dev/null 2>&1; then
       version=$(tool_version "$binary" || true)
       if [[ -z $version ]]; then
@@ -515,6 +554,7 @@ start_task starship install_starship_task
 start_task omz install_omz_task
 start_task fastfetch download_fastfetch_task
 start_task agy install_agy_task
+start_task gitleaks install_gitleaks_task
 
 wait_task node || { printf 'ERROR: Node.js installation failed.\n' >&2; exit 1; }
 milestone node
@@ -540,6 +580,7 @@ wait_task omz || { printf 'ERROR: Oh My Zsh installation failed.\n' >&2; exit 1;
 wait_task starship || true
 wait_task fastfetch || true
 wait_task agy || true
+wait_task gitleaks || { printf 'ERROR: gitleaks installation failed.\n' >&2; exit 1; }
 wait_task nvim-plugins || true
 milestone tasks
 

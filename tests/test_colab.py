@@ -281,7 +281,7 @@ if command == "bash -s":
     print("Workspace: 1M")
     print("Bootstrap: " + (marker.read_text().strip() if marker.exists() else "missing"))
     for name in ("zsh", "tmux", "nvim", "starship", "eza", "fastfetch", "node",
-                 "python3", "git", "cmake", "gh", "codex", "claude", "opencode", "agy"):
+                 "python3", "git", "cmake", "gh", "gitleaks", "codex", "claude", "opencode", "agy"):
         print("%s: fake" % name)
     sys.exit(0)
 
@@ -944,10 +944,29 @@ class ColabStaticContractTests(unittest.TestCase):
             "--force",
             "chmod 0700 \"$STATE_DIR\"",
             "usermod -s",
+            "install_gitleaks_task",
+            "GITLEAKS_VERSION",
+            "gitleaks_${version}_linux_x64.tar.gz",
+            "gitleaks_${version}_checksums.txt",
         ):
             self.assertIn(value, text)
         for forbidden in ("keep-alive", "keepalive", "GH_TOKEN", "persistent/", "colab new", "colab stop --all"):
             self.assertNotIn(forbidden, text)
+
+    def test_gitleaks_is_exposed_in_status_and_config(self):
+        status = (ROOT / "scripts" / "colab" / "status.sh").read_text()
+        common = (ROOT / "scripts" / "colab" / "_common.sh").read_text()
+        setup = (ROOT / "scripts" / "colab" / "setup.sh").read_text()
+        self.assertIn("check gitleaks gitleaks version", status)
+        self.assertIn("COLAB_GITLEAKS_VERSION:=8.30.1", common)
+        self.assertIn("COLAB_GITLEAKS_VERSION", setup)
+
+    def test_colab_test_runner_excludes_local_state_and_uses_one_connection(self):
+        text = (ROOT / "scripts" / "colab" / "test.sh").read_text()
+        self.assertIn("python3 -m unittest discover -s tests -v", text)
+        self.assertEqual(text.count("ssh_run "), 1)
+        for value in ("./.git", "./.colab", "./.env", "./persistent", "./ssh"):
+            self.assertIn("--exclude='%s'" % value, text)
 
     def test_bootstrap_installer_regressions(self):
         text = (ROOT / "scripts" / "colab" / "bootstrap.sh").read_text()

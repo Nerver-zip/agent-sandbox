@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/token-monitor"))
 import manager  # noqa: E402
+import antigravity_projection  # noqa: E402
 from relay import Hub, HubError  # noqa: E402
 from snapshot import DIR_FLAGS  # noqa: E402
 
@@ -153,6 +154,55 @@ class OfficialCollectorTest(unittest.TestCase):
     def projects(self):
         period = self.device_record()["periods"]["allTime"]
         return period["projects"]
+
+    def test_projected_generation_matches_pinned_scanner(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        source_dir = self.path / "projection-source/.gemini/antigravity-cli/conversations"
+        target_dir = self.path / "projection-output/.gemini/antigravity-cli/conversations"
+        source_dir.mkdir(parents=True)
+        target_dir.mkdir(parents=True)
+        source = source_dir / "session.db"
+        target = target_dir / "session.db"
+        fake_secret = b'{"access_token":"fixture-private-value"}'
+        usage = number(2, 500) + number(5, 16000) + number(9, 40) + number(10, 300) + blob(11, b"response")
+        row = blob(1, blob(2, blob(3, fake_secret)) + blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Fixture")) + blob(2, number(1, stamp))
+        with closing(sqlite3.connect(source)) as db, db:
+            db.executescript("CREATE TABLE gen_metadata(idx INTEGER,data BLOB); CREATE TABLE trajectory_metadata_blob(data BLOB); CREATE TABLE tokens(secret BLOB);")
+            db.execute("INSERT INTO gen_metadata VALUES (0,?)", (row,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+            db.execute("INSERT INTO tokens VALUES (?)", (fake_secret,))
+        self.assertTrue(antigravity_projection.project_database(source, target))
+        self.assertNotIn(fake_secret, target.read_bytes())
+
+        def scan(home):
+            output = subprocess.check_output([
+                "docker", "run", "--rm", "--network=none",
+                "--mount", f"type=bind,src={self.path},dst=/fixture,readonly",
+                "--env", "TOKSCALE_CONFIG_DIR=/opt/tokscale-pricing",
+                "--env", "TOKSCALE_PRICING_CACHE_ONLY=1",
+                "--entrypoint", "/opt/token-monitor/node_modules/.bin/tokscale", IMAGE,
+                "--offline", "--home", f"/fixture/{home}", "--client", "antigravity-cli",
+                "--group-by", "client,workspace,session,model", "--json", "--no-spinner",
+            ], timeout=60, stderr=subprocess.DEVNULL)
+            result = json.loads(output)
+            result.pop("processingTimeMs", None)
+            return result
+        original = scan("projection-source")
+        projected = scan("projection-output")
+        self.assertEqual(original, projected)
+        self.assertEqual(original["totalInput"], 500)
+        self.assertEqual(original["totalCacheRead"], 16000)
+        self.assertEqual(original["totalOutput"], 300)
+        self.assertEqual(original["entries"][0]["reasoning"], 40)
+        self.assertGreater(original["totalCost"], 0)
 
     def test_antigravity_upgrade_retention_and_restore(self):
         self.check_antigravity_retention(remove_one=False)

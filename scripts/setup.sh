@@ -331,6 +331,9 @@ DIND_CPUS=2.0
 CONF
 fi
 chmod 0600 .env
+if [[ -e .token-monitor.json || -L .token-monitor.json ]]; then
+  ./scripts/token-monitor.sh setup || fail 'Token Monitor setup failed. Check its configuration and rerun scripts/token-monitor.sh setup.'
+fi
 printf '\nSetup complete. Tailscale host IP: %s\n' "$TS_IP"
 echo 'Run ./scripts/up.sh to deploy.'
 echo 'SSH host identity, Codex auth, Claude credentials, Git config and optional GitHub PAT persist across docker compose down.'

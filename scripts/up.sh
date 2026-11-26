@@ -88,6 +88,9 @@ docker compose config --quiet
 EXISTING_WS=$(docker compose ps -a -q workspace 2>/dev/null || true)
 EXISTING_DIND=$(docker compose ps -a -q dind 2>/dev/null || true)
 if [[ $REBUILD -eq 1 || -z "$EXISTING_WS" || -z "$EXISTING_DIND" ]]; then
+  if [[ -n "$EXISTING_WS" ]]; then
+    ./scripts/token-monitor.sh final || fail 'Token Monitor final capture failed. Resume the workspace and retry, or run scripts/stop.sh --down --force to discard unsaved usage.'
+  fi
   docker compose up --build -d --force-recreate --remove-orphans
 else
   RUNNING_WS=$(docker compose ps -q workspace 2>/dev/null || true)
@@ -98,6 +101,9 @@ else
     echo 'Starting existing Agent Sandbox containers (preserving workspace)...'
     docker compose start
   fi
+fi
+if [[ -e .token-monitor.json || -L .token-monitor.json ]]; then
+  ./scripts/token-monitor.sh start || echo 'Warning: Token Monitor could not start. Check scripts/token-monitor.sh status.' >&2
 fi
 PORT=$(sed -n 's/^AGENT_SSH_PORT=//p' .env | tail -n 1)
 printf '\nAgent Sandbox ready: ssh -p %s agent@%s\n' "${PORT:-2222}" "$TS_CURRENT"

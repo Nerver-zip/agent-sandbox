@@ -239,7 +239,7 @@ This directory mount lets current Codex releases create a private `.auth-*` temp
 To import an existing `auth.json` file from another machine:
 
 ```bash
-docker compose stop
+./scripts/stop.sh
 ./scripts/import-codex-auth.sh /path/to/codex/auth.json
 ./scripts/up.sh
 ```
@@ -247,7 +247,7 @@ docker compose stop
 To delete stored Codex credentials:
 
 ```bash
-docker compose stop
+./scripts/stop.sh
 ./scripts/reset-codex-auth.sh
 ./scripts/up.sh
 ```
@@ -277,7 +277,7 @@ The image includes generic preferences in `/home/agent/.claude/settings.json`, `
 To import existing Claude credentials:
 
 ```bash
-docker compose stop
+./scripts/stop.sh
 ./scripts/import-claude-auth.sh /path/to/.credentials.json
 ./scripts/up.sh
 ```
@@ -285,7 +285,7 @@ docker compose stop
 To delete stored Claude credentials:
 
 ```bash
-docker compose stop
+./scripts/stop.sh
 ./scripts/reset-claude-auth.sh
 ./scripts/up.sh
 ```
@@ -337,7 +337,7 @@ scp ~/.gitconfig nerver@100.118.53.107:~/client.gitconfig
 To import an existing `.gitconfig` from another machine at any time:
 
 ```bash
-docker compose stop
+./scripts/stop.sh
 ./scripts/import-git-config.sh /path/to/.gitconfig
 ./scripts/up.sh
 ```
@@ -345,7 +345,7 @@ docker compose stop
 You can also import directly with a name and email:
 
 ```bash
-docker compose stop
+./scripts/stop.sh
 ./scripts/import-git-config.sh "Marcelo Augusto" "marceloaugusto12161@gmail.com"
 ./scripts/up.sh
 ```
@@ -353,7 +353,7 @@ docker compose stop
 To delete stored Git identity and reset to default:
 
 ```bash
-docker compose stop
+./scripts/stop.sh
 ./scripts/reset-git-config.sh
 ./scripts/up.sh
 ```
@@ -388,13 +388,17 @@ Leave the existing container running while you run `setup.sh` so the script can 
 
 Push or back up workspace changes before updating, as recreating the container resets its writable filesystem.
 
+## Token Monitor
+
+Optional [Token Monitor accounting](docs/TOKEN_MONITOR.md) reports Claude Code, Codex and OpenCode usage to an independent Hub. Configure it once on the Docker host to preserve usage across sandbox resets. Use the lifecycle scripts below so they can capture final usage before removing the workspace.
+
 ## Container lifecycle
 
 | Operation | Workspace files | Server host key | Client authorized keys | Codex credentials | Claude credentials | GitHub PAT | Git config |
 |---|---|---|---|---|---|---|---|
-| `docker compose stop` → `./scripts/up.sh` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/stop.sh` → `./scripts/up.sh` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
 | `docker compose restart` | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
-| `docker compose down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
+| `./scripts/stop.sh --down` → `./scripts/up.sh` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
 | `./scripts/up.sh --rebuild` | Cleared | Preserved | Preserved | Preserved | Preserved | Preserved | Preserved |
 | `./scripts/destroy.sh` | Cleared | Deleted | Deleted | Deleted | Deleted | Deleted | Deleted |
 
@@ -404,11 +408,11 @@ Standard management commands:
 
 ```bash
 # Pause and resume without resetting container data (restores firewall on resume)
-docker compose stop
+./scripts/stop.sh
 ./scripts/up.sh
 
 # Reset the container filesystem while preserving credentials and SSH keys
-docker compose down
+./scripts/stop.sh --down
 ./scripts/up.sh
 # Or in a single command:
 ./scripts/up.sh --rebuild
@@ -417,7 +421,7 @@ docker compose down
 ./scripts/destroy.sh
 ```
 
-`docker compose down` stops the containers but leaves firewall rules active. To restart the environment, use `./scripts/up.sh` so the network and firewall rules are verified before the container starts.
+`./scripts/stop.sh --down` stops and removes the containers and leaves firewall rules active. To restart the environment, use `./scripts/up.sh` so the network and firewall rules are verified before the container starts.
 
 Running `destroy.sh` deletes the SSH host key, rotating the server identity. After running it, update your local `known_hosts` file for port 2222 before reconnecting.
 

@@ -23,6 +23,10 @@ To provide Docker capabilities to coding agents without exposing the host's Dock
 5. The embedded Docker DNS resolver may provide DNS responses. Docker's DNS proxy can have configuration-dependent behavior; do not regard DNS isolation as preventing every form of internal name or metadata discovery.
 6. `persistent/ssh/authorized_keys` (client *public* keys) and `persistent/ssh/known_hosts` are mounted read-write as user UID 10001 so authorized devices (desktop, laptop, phones) and outgoing SSH host verifications survive container recreation. They do not contain private keys.
 
+## Optional Token Monitor integration
+
+The host reads only allowlisted accounting sources and runs the upstream collector in a separate non-root container with its network disabled. A private Unix socket allows the collector to submit usage to the configured Hub through the host. The Hub secret stays outside both containers. The firewall, sandbox bridge and workspace mounts are unchanged. Selected transcripts remain private host data during staging and recovery. [Token Monitor trust boundary and retention](TOKEN_MONITOR.md#trust-boundary)
+
 ## Google Colab backend trust boundary
 
 The optional Colab backend is a separate trust zone from the Docker deployment. It runs on a managed Google VM reached through the official Colab CLI's WebSocket SSH proxy. It does not use the host Docker daemon, the Docker bridge, the host firewall rules, or the Docker credential mounts described above.

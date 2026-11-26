@@ -8,10 +8,11 @@ After=docker.service tailscaled.service network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/nerver/prod/agent-sandbox
-ExecStart=/home/nerver/prod/agent-sandbox/scripts/up.sh
-ExecStop=/usr/bin/docker compose stop
+WorkingDirectory=/opt/agent-sandbox
+ExecStart=/opt/agent-sandbox/scripts/up.sh
+ExecStop=/opt/agent-sandbox/scripts/stop.sh
 TimeoutStartSec=0
+TimeoutStopSec=300s
 # Useful when Tailscale has not yet assigned its address at initial boot.
 Restart=on-failure
 RestartSec=15s

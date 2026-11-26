@@ -232,7 +232,10 @@ class OfficialCollectorTest(unittest.TestCase):
     def test_antigravity_monotonic_generation_update_and_restore(self):
         self.check_antigravity_retention(remove_one=False, rewrite=True)
 
-    def check_antigravity_retention(self, remove_one, rewrite=False):
+    def test_antigravity_disjoint_restored_generations_import_without_losing_history(self):
+        self.check_antigravity_retention(remove_one=False, branch=True)
+
+    def check_antigravity_retention(self, remove_one, rewrite=False, branch=False):
         # Upstream's documented protobuf wire fields, generated without real user data.
         def varint(value):
             result = bytearray()
@@ -329,6 +332,27 @@ class OfficialCollectorTest(unittest.TestCase):
             self.monitor.deliver(self.monitor.pending()[0])
             self.assertEqual(self.totals(), (advanced_counts, advanced_costs))
             counts, costs = advanced_counts, advanced_costs
+        if branch:
+            fresh_usage = number(2, 50) + number(10, 5) + blob(11, b"response-fresh")
+            fresh_row = blob(1, blob(4, fresh_usage) + blob(19, b"gemini-3-flash-a"))
+            # A restored older conversation lacks a previously captured row but
+            # contains a distinct new generation at an unused index.
+            writers[1].execute("DELETE FROM gen_metadata WHERE idx=0")
+            writers[1].execute("INSERT INTO gen_metadata VALUES (2, ?, 0)", (fresh_row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            merged_counts, merged_costs = self.totals()
+            self.assertEqual(merged_counts, {**counts, "antigravity": 33735})
+            self.assertGreater(merged_costs["antigravity"], costs["antigravity"])
+            self.assertEqual(self.projects()["antigravity-project"]["clients"], {"antigravity": 33735})
+            writers[1].execute("DELETE FROM gen_metadata WHERE idx=2")
+            writers[1].execute("INSERT INTO gen_metadata VALUES (0, ?, 0)", (row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (merged_counts, merged_costs))
+            counts, costs = merged_counts, merged_costs
         if remove_one:
             writers[0].close()
             first_db = directory / "session-0.db"

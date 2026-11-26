@@ -90,6 +90,96 @@ class AntigravityArchiveTest(unittest.TestCase):
             archive.update(self.source, self.retained)
         self.assertEqual(self.read_rows(), [(0, b"first")])
 
+    def test_disjoint_identified_generations_merge_with_stable_anchor(self):
+        p = archive.projection
+        def scalar(field, value):
+            return p.enc(field << 3) + p.enc(value)
+        def blob(field, value):
+            return p.enc((field << 3) | 2) + p.enc(len(value)) + value
+        def generation(identity, amount):
+            return blob(1, blob(4, scalar(2, amount) + blob(11, p.response_id(identity))) + blob(19, b"fixture-model"))
+        first, retained, fresh = generation(b"a", 10), generation(b"b", 20), generation(b"c", 30)
+        anchor = blob(1, blob(1, b"file:///workspace/project")) + blob(2, scalar(1, 1781502653))
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (first,))
+            db.execute("INSERT INTO gen_metadata VALUES (1,?)", (retained,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (anchor,))
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("DELETE FROM gen_metadata WHERE idx=1")
+            db.execute("INSERT INTO gen_metadata VALUES (2,?)", (fresh,))
+        archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, first), (1, retained), (2, fresh)])
+        archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, first), (1, retained), (2, fresh)])
+
+    def test_disjoint_merge_rejects_conflicting_identity_at_same_index(self):
+        p = archive.projection
+        def scalar(field, value):
+            return p.enc(field << 3) + p.enc(value)
+        def blob(field, value):
+            return p.enc((field << 3) | 2) + p.enc(len(value)) + value
+        def generation(identity):
+            return blob(1, blob(4, scalar(2, 10) + blob(11, p.response_id(identity))))
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (generation(b"first"),))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (blob(2, scalar(1, 1781502653)),))
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (generation(b"different"),))
+            db.execute("INSERT INTO gen_metadata VALUES (1,?)", (generation(b"new"),))
+        with self.assertRaisesRegex(archive.ArchiveError, "Divergent"):
+            archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, generation(b"first"))])
+
+    def test_disjoint_merge_rejects_response_moved_to_a_different_index(self):
+        p = archive.projection
+        def scalar(field, value):
+            return p.enc(field << 3) + p.enc(value)
+        def blob(field, value):
+            return p.enc((field << 3) | 2) + p.enc(len(value)) + value
+        def generation(identity):
+            return blob(1, blob(4, scalar(2, 10) + blob(11, p.response_id(identity))))
+        original, other = generation(b"same"), generation(b"other")
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (original,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (blob(2, scalar(1, 1781502653)),))
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("DELETE FROM gen_metadata")
+            db.execute("INSERT INTO gen_metadata VALUES (1,?)", (original,))
+            db.execute("INSERT INTO gen_metadata VALUES (2,?)", (other,))
+        with self.assertRaisesRegex(archive.ArchiveError, "Divergent"):
+            archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, original)])
+
+    def test_disjoint_merge_rejects_missing_identity_or_session_anchor(self):
+        p = archive.projection
+        def scalar(field, value):
+            return p.enc(field << 3) + p.enc(value)
+        def blob(field, value):
+            return p.enc((field << 3) | 2) + p.enc(len(value)) + value
+        row = blob(1, blob(4, scalar(2, 10) + blob(11, p.response_id(b"a"))))
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (row,))
+            db.execute("INSERT INTO gen_metadata VALUES (1,?)", (row,))
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("DELETE FROM gen_metadata WHERE idx=1")
+            db.execute("INSERT INTO gen_metadata VALUES (2,?)", (row,))
+        with self.assertRaisesRegex(archive.ArchiveError, "Divergent"):
+            archive.update(self.source, self.retained)
+        # A usable anchor still cannot justify merging an unidentified row.
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("DELETE FROM gen_metadata WHERE idx=2")
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (blob(2, scalar(1, 1781502653)),))
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("DELETE FROM gen_metadata WHERE idx=1")
+            db.execute("INSERT INTO gen_metadata VALUES (2,?)", (blob(1, blob(4, scalar(2, 20))),))
+        with self.assertRaisesRegex(archive.ArchiveError, "Divergent"):
+            archive.update(self.source, self.retained)
+
     def test_divergent_versions_fail_without_replacing_archive(self):
         archive.update(self.source, self.retained)
         with closing(sqlite3.connect(self.db)) as db, db:

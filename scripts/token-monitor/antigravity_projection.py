@@ -176,6 +176,51 @@ def _unique_fields(data):
     return result
 
 
+def generation_identity(data):
+    """Return an unambiguous projected response ID, or None."""
+    try:
+        root = _unique_fields(data)
+        chat = root.get(1)
+        if not chat or chat[0] != 2:
+            return None
+        usage = _unique_fields(chat[1]).get(4)
+        if not usage or usage[0] != 2:
+            return None
+        identity = _unique_fields(usage[1]).get(11)
+        if not identity or identity[0] != 2:
+            return None
+        value = identity[1]
+        if len(value) != 64 or any(char not in b"0123456789abcdef" for char in value):
+            return None
+        return value
+    except (TypeError, ValueError):
+        return None
+
+
+def session_has_created_at(data):
+    """Check the positive, bounded timestamp used by Tokscale as fallback."""
+    try:
+        timestamp = _unique_fields(data).get(2)
+        if not timestamp or timestamp[0] != 2:
+            return False
+        fields_by_number = _unique_fields(timestamp[1])
+        seconds = fields_by_number.get(1)
+        nanos = fields_by_number.get(2)
+        if not seconds or seconds[0] != 0 or (nanos and nanos[0] != 0):
+            return False
+        def integer(raw):
+            _, pos = read_varint(raw, 0)
+            value, end = read_varint(raw, pos)
+            if end != len(raw):
+                raise ValueError("invalid timestamp")
+            return value
+        second = integer(seconds[2])
+        nano = integer(nanos[2]) if nanos else 0
+        return 0 < second <= ((1 << 63) - 1 - 999) // 1000 and nano < 1_000_000_000
+    except (TypeError, ValueError):
+        return False
+
+
 def monotonic_generation_update(old, new):
     """Accept only the same identified generation with nondecreasing counters.
 

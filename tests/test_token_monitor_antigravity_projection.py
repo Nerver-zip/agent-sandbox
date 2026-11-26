@@ -86,6 +86,18 @@ class ProjectionTest(unittest.TestCase):
         packed = projection.enc(37) + b"fixture-private-value"
         self.assertEqual(projection.project(blob(2, packed), projection.GEN), blob(2, projection.enc(37)))
 
+    def test_merge_identity_and_session_anchor_validation(self):
+        identity = projection.response_id(b"response")
+        row = blob(1, blob(4, blob(11, identity)))
+        self.assertEqual(projection.generation_identity(row), identity)
+        self.assertIsNone(projection.generation_identity(blob(1, blob(4, blob(11, b"raw")))))
+        self.assertIsNone(projection.generation_identity(row + row))
+        self.assertTrue(projection.session_has_created_at(blob(2, scalar(1, 1781502653))))
+        for timestamp in (b"", blob(2, scalar(1, 0)), blob(2, scalar(1, 1) + scalar(2, 1_000_000_000)),
+                          blob(2, scalar(1, (1 << 63) - 1)), blob(2, scalar(1, 1) + scalar(1, 2))):
+            with self.subTest(timestamp=timestamp):
+                self.assertFalse(projection.session_has_created_at(timestamp))
+
     def test_only_monotonic_same_response_generation_updates_are_safe(self):
         identity = projection.response_id(b"response")
         def generation(input_count, output_count, response=identity, model=b"fixture-model"):

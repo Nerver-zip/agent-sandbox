@@ -104,6 +104,52 @@ def generations_advance(older, newer):
         return True
 
 
+def merge_disjoint(older, candidate):
+    """Retain disjoint identified rows only when their original dates survive.
+
+    The candidate is a disposable file. Reject any ambiguity instead of
+    inventing a relationship between two generations or timestamp clocks.
+    """
+    if not metadata_preserved(older, candidate):
+        return False
+    with closing(sqlite3.connect(candidate)) as db, db:
+        db.execute("PRAGMA trusted_schema=OFF")
+        db.execute("ATTACH DATABASE ? AS retained", (str(older),))
+        tables = {row[0] for row in db.execute("SELECT name FROM retained.sqlite_schema WHERE type='table'")}
+        if "trajectory_metadata_blob" not in tables:
+            return False
+        anchor = db.execute("SELECT data FROM retained.trajectory_metadata_blob LIMIT 1").fetchone()
+        if not anchor or not projection.session_has_created_at(anchor[0]):
+            return False
+        identities = {}
+        for schema in ("retained", "main"):
+            if db.execute(f"SELECT 1 FROM {schema}.gen_metadata GROUP BY idx HAVING idx IS NULL OR COUNT(*) != 1 LIMIT 1").fetchone():
+                return False
+            observed = set()
+            for idx, data in db.execute(f"SELECT idx,data FROM {schema}.gen_metadata"):
+                identity = projection.generation_identity(data)
+                if identity is None or identity in observed:
+                    return False
+                observed.add(identity)
+                if schema == "retained":
+                    identities[identity] = idx
+                elif identity in identities and identities[identity] != idx:
+                    # The same response at a new index can select a different
+                    # step timestamp even when its usage bytes are identical.
+                    return False
+        if db.execute("""
+            SELECT 1 FROM retained.gen_metadata old JOIN main.gen_metadata current ON old.idx=current.idx
+            WHERE old.data IS NOT current.data LIMIT 1
+        """).fetchone():
+            return False
+        db.execute("""
+            INSERT INTO main.gen_metadata(idx,data)
+            SELECT old.idx,old.data FROM retained.gen_metadata old
+            WHERE NOT EXISTS (SELECT 1 FROM main.gen_metadata current WHERE current.idx=old.idx)
+        """)
+        return True
+
+
 def update(source_dir, archive_dir, *, require_index=False):
     """Atomically retain compatible observations; return retained DB paths.
 
@@ -156,7 +202,11 @@ def update(source_dir, archive_dir, *, require_index=False):
                     if generations_advance(temp, dest):
                         continue  # A prior version of identified generations.
                     if not generations_advance(dest, temp):
-                        raise ArchiveError("Divergent Antigravity conversation versions require recovery", 73)
+                        if not merge_disjoint(dest, temp):
+                            raise ArchiveError("Divergent Antigravity conversation versions require recovery", 73)
+                        # SQLite changed the candidate's mtime. Restore the
+                        # source time; the verified session anchor dates rows.
+                        os.utime(temp, ns=(source.stat().st_mtime_ns, source.stat().st_mtime_ns))
                 if not metadata_preserved(dest, temp):
                     if new_in_old:
                         continue

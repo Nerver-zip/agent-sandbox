@@ -13,7 +13,8 @@ FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
 DB = re.compile(r"opencode(?:-[A-Za-z0-9._-]+)?\.db")
 ROOTS = {
     "claude": ((".claude/projects", ".jsonl", 8), (".claude/transcripts", ".jsonl", 8)),
-    "codex": ((".codex/sessions", ".jsonl", 8), (".codex/archived_sessions", ".jsonl", 8)),
+    "codex": ((".codex/sessions", (".jsonl", ".jsonl.zst"), 8),
+              (".codex/archived_sessions", (".jsonl", ".jsonl.zst"), 8)),
     "opencode": ((".local/share/opencode/storage/message", ".json", 1),),
 }
 OPENCODE = ".local/share/opencode"
@@ -123,7 +124,7 @@ class Snapshot:
         if self.old_index.get(relative) == key:
             os.link(self.previous / "home" / relative, target)
         else:
-            with os.fdopen(os.dup(fd), "rb") as src, target.open("xb+") as dest:
+            with os.fdopen(os.dup(fd), "rb") as src, target.open("xb") as dest:
                 remaining = size
                 while remaining:
                     chunk = src.read(min(remaining, COPY_CHUNK))
@@ -131,9 +132,10 @@ class Snapshot:
                         raise SnapshotError("A usage source changed during collection")
                     dest.write(chunk)
                     remaining -= len(chunk)
-                if relative.endswith(".jsonl"):
-                    truncate_partial_line(dest, size)
                 dest.flush()
+                # Tokscale uses file time for usage records without timestamps.
+                # Retain the original time across copies and container restore.
+                os.utime(dest.fileno(), ns=(signature[3], signature[3]))
                 os.fsync(dest.fileno())
             self.copied += size
         if file_info(fd) != signature:
@@ -194,20 +196,6 @@ class Snapshot:
                 for _, source, _ in companions:
                     if source is not None:
                         os.close(source)
-
-
-def truncate_partial_line(dest, size):
-    # Provider writers append complete newline-terminated records. Withhold a
-    # concurrent final fragment so it can't replace an archived observation.
-    while size:
-        start = max(0, size - COPY_CHUNK)
-        dest.seek(start)
-        last = dest.read(size - start).rfind(b"\n")
-        if last >= 0:
-            dest.truncate(start + last + 1)
-            return
-        size = start
-    dest.truncate(0)
 
 
 def capture(root_fd, destination: Path, previous: Path | None, providers):

@@ -34,15 +34,18 @@ class SnapshotTests(unittest.TestCase):
         result = snapshot.capture(self.fd, target, previous, providers)
         return target, result
 
-    def test_only_supported_sources_and_complete_jsonl(self):
+    def test_only_supported_sources_keep_bytes_and_source_time(self):
         data = {
             ".claude/projects/project/a.jsonl": b"{}\n{",
             ".codex/sessions/2026/11/01/rollout.jsonl": b"{}\n",
-            ".codex/archived_sessions/rollout.jsonl": b"{}\n",
+            ".codex/archived_sessions/rollout.jsonl": b"{}",
+            ".codex/archived_sessions/compressed.jsonl.zst": b"compressed fixture",
             ".local/share/opencode/storage/message/session/msg.json": b"{}",
         }
+        stamp = 1782806400123456789
         for path, content in data.items():
-            self.write(path, content)
+            target = self.write(path, content)
+            os.utime(target, ns=(stamp, stamp))
         self.write(".codex/auth.json", b"test secret")
         self.write(".claude/.credentials.json", b"test secret")
         self.write(".local/share/opencode/auth.json", b"test secret")
@@ -53,8 +56,9 @@ class SnapshotTests(unittest.TestCase):
             str(path.relative_to(target / "home")): path.read_bytes()
             for path in (target / "home").rglob("*") if path.is_file()
         }
-        data[".claude/projects/project/a.jsonl"] = b"{}\n"
         self.assertEqual(selected, data)
+        for path in data:
+            self.assertEqual((target / "home" / path).stat().st_mtime_ns, stamp)
 
     def test_reject_links_fifos_and_mount_crossing(self):
         source = self.write(".codex/auth.json", b"test secret")
@@ -115,14 +119,14 @@ class SnapshotTests(unittest.TestCase):
         path = self.write(".codex/sessions/a.jsonl", b"{}\n")
         old, _ = self.capture()
         path.write_bytes(b'{"changed":true}\n')
-        original = snapshot.truncate_partial_line
+        original = os.fsync
 
-        def append_mid_copy(dest, size):
-            original(dest, size)
+        def append_mid_copy(fd):
+            original(fd)
             with path.open("ab") as source:
                 source.write(b"{}\n")
 
-        with mock.patch.object(snapshot, "truncate_partial_line", append_mid_copy):
+        with mock.patch.object(snapshot.os, "fsync", append_mid_copy):
             with self.assertRaises(snapshot.SnapshotError):
                 self.capture("interrupted", old)
         self.assertFalse((self.tmp / "interrupted").exists())

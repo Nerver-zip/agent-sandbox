@@ -34,7 +34,6 @@ class OfficialCollectorTest(unittest.TestCase):
         self.home = self.source / "home/agent"
         self.home.mkdir(parents=True)
         self.secret = "isolated-fixture-secret"
-        self.device = "acceptance-device"
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             self.port = listener.getsockname()[1]
@@ -47,9 +46,10 @@ class OfficialCollectorTest(unittest.TestCase):
         self.saved_state, manager.STATE = manager.STATE, self.state
         self.addCleanup(setattr, manager, "STATE", self.saved_state)
         self.monitor = manager.Monitor({
-            "hub": self.hub, "device": self.device, "interval": 60,
+            "hub": self.hub, "device": None, "prefix": "acceptance", "interval": 60,
             "version": manager.DEFAULT_VERSION, "providers": ["claude", "codex", "opencode"], "timezone": "UTC",
         })
+        self.device = self.monitor.device
         self.monitor.image = IMAGE
         self.monitor.container_name = f"token-monitor-test-{os.getpid()}-{self.port}"
         self.monitor.snapshots.mkdir()
@@ -179,6 +179,53 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals(), initial)
+
+    def test_adopting_an_existing_device_preserves_deleted_sessions(self):
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        prior_totals = self.totals()
+
+        # Move only the usage archives, as the handoff guide prescribes.
+        prior_archive = self.monitor.collector_state / "archive"
+        adopted_state = self.path / "adopted"
+        archive = adopted_state / "collector/archive"
+        archive.mkdir(parents=True)
+        for name in ("session-usage-archive.sqlite", "daily-history-calendars.json"):
+            source = prior_archive / name
+            if source.is_file():
+                shutil.copyfile(source, archive / name)
+        self.home.rename(self.path / "old-home")
+        self.home.mkdir()
+
+        with patch.object(manager, "STATE", adopted_state):
+            adopted = manager.Monitor({**self.monitor.config, "device": self.device})
+            adopted.image = self.monitor.image
+            adopted.container_name = self.monitor.container_name
+            adopted.snapshots.mkdir()
+            fd = os.open(self.source, DIR_FLAGS)
+            try:
+                adopted.publish(fd, "adopted-fixture")
+            finally:
+                os.close(fd)
+            adopted.deliver(adopted.pending()[0])
+        self.assertEqual(self.totals(), prior_totals)
+
+    @unittest.skipUnless(shutil.which("zstd"), "requires zstd to generate a Codex archive fixture")
+    def test_compressed_codex_archive_and_jsonl_tails(self):
+        claude, codex, _, _ = self.sources
+        # Both a complete final record without LF and an incomplete fragment
+        # should reach the pinned scanner with their source bytes intact.
+        claude.write_bytes(claude.read_bytes().rstrip(b"\n"))
+        archive = self.home / ".codex/archived_sessions" / (codex.name + ".zst")
+        archive.parent.mkdir()
+        (claude.parent / "incomplete.jsonl").write_bytes(b'{"type":"assistant"')
+        subprocess.run(["zstd", "-q", "-o", str(archive)], input=codex.read_bytes(),
+                       check=True, timeout=10)
+        codex.unlink()
+
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals()[0], {"claude": 110, "codex": 220, "opencode": 132})
 
     def test_controlled_stop_captures_last_write_before_container_removal(self):
         # Build an isolated workspace with fixture data in its writable-overlay

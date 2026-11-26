@@ -257,14 +257,27 @@ class Monitor:
     def __init__(self, config):
         self.config = config
         self.hub = config["hub"]
-        self.device = self.load_device()
         self.snapshots = STATE / "snapshots"
         self.collector_state = STATE / "collector"
+        self.device = self.load_device()
         context = PROJECT / "scripts/token-monitor"
         source_hash = hashlib.sha256((context / "Dockerfile").read_bytes() + (context / "collect.py").read_bytes())
         self.image = f"agent-sandbox-token-monitor:{config['version']}-{source_hash.hexdigest()[:12]}"
         instance = hashlib.sha256(os.fsencode(PROJECT)).hexdigest()[:16]
         self.container_name = f"agent-sandbox-token-monitor-{instance}"
+
+    def require_session_archive(self):
+        archive = self.collector_state / "archive"
+        for name in ("session-usage-archive.sqlite", "session-usage-archive.json"):
+            try:
+                info = (archive / name).lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_size:
+                return
+        raise ConfigurationError(
+            "The device's session archive is missing. Restore the archive before publishing under this ID."
+        )
 
     def load_device(self):
         path = STATE / "device.json"
@@ -272,7 +285,13 @@ class Monitor:
             device = json.loads(path.read_text())
             if self.config["device"] not in {None, device}:
                 raise ConfigurationError("device_id differs from the persisted identity. See migration instructions.")
+            status = STATE / "status.json"
+            acknowledged = status.exists() and json.loads(status.read_text()).get("last_success")
+            if self.config["device"] is not None or acknowledged:
+                self.require_session_archive()
             return device
+        if self.config["device"] is not None:
+            self.require_session_archive()
         device = self.config["device"] or f"{self.config['prefix']}-{uuid.uuid4().hex}"
         durable_json(path, device)
         return device

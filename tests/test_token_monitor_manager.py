@@ -65,9 +65,19 @@ class ConfigurationTest(unittest.TestCase):
         self.state.mkdir()
         # Monitor hashes only its image build inputs.
         shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        with self.assertRaisesRegex(manager.ConfigurationError, "session archive is missing"):
+            manager.Monitor(manager.configuration())
+        self.assertFalse((self.state / "device.json").exists())
+        archive = self.state / "collector/archive/session-usage-archive.json"
+        archive.parent.mkdir(parents=True)
+        archive.write_text('{"sessions":{}}')
         self.assertEqual(manager.Monitor(manager.configuration()).device, "migration-fixture")
         self.write(device_prefix="new-prefix")
         self.assertEqual(manager.Monitor(manager.configuration()).device, "migration-fixture")
+        manager.durable_json(self.state / "status.json", {"last_success": 1})
+        archive.unlink()
+        with self.assertRaisesRegex(manager.ConfigurationError, "session archive is missing"):
+            manager.Monitor(manager.configuration())
         self.write(device_id="other-device")
         with self.assertRaises(manager.ConfigurationError):
             manager.Monitor(manager.configuration())

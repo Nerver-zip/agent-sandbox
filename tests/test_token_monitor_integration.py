@@ -204,7 +204,7 @@ class OfficialCollectorTest(unittest.TestCase):
         self.assertEqual(original["entries"][0]["reasoning"], 40)
         self.assertGreater(original["totalCost"], 0)
 
-    def test_malformed_antigravity_aborts_snapshot_and_removes_worker(self):
+    def test_malformed_antigravity_is_isolated_and_removes_worker(self):
         directory = self.home / ".gemini/antigravity-cli/conversations"
         directory.mkdir(parents=True)
         secret = b"fixture-sensitive-input"
@@ -212,9 +212,9 @@ class OfficialCollectorTest(unittest.TestCase):
             db.execute("CREATE TABLE gen_metadata(idx INTEGER,data BLOB)")
             db.execute("INSERT INTO gen_metadata VALUES (0,?)", (b"\x0a\xff" + secret,))
         self.monitor.config["providers"].append("antigravity")
-        with self.assertRaisesRegex(manager.SnapshotError, "sanitizer failed"):
-            self.publish()
-        self.assertEqual(self.monitor.pending(), [])
+        self.publish()
+        self.assertEqual(len(self.monitor.pending()), 1)
+        self.assertEqual(len(json.loads((self.monitor.pending()[0] / "issues.json").read_text())), 1)
         self.assertIsNone(self.monitor._sanitizer_name)
         status = subprocess.run(["docker", "container", "inspect", self.monitor.container_name + "-sanitize"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
@@ -384,12 +384,14 @@ class OfficialCollectorTest(unittest.TestCase):
             self.monitor.deliver(self.monitor.pending()[0])
             self.assertEqual(self.totals(), (counts, costs))
             original_bytes = retained_file.read_bytes()
+            original_mtime = retained_file.stat().st_mtime_ns
             retained_file.write_bytes(original_bytes[:-1] + bytes([original_bytes[-1] ^ 1]))
             self.publish()
             with self.assertRaisesRegex(manager.JobError, "usage archive is missing"):
                 self.monitor.deliver(self.monitor.pending()[0])
             self.assertEqual(self.totals(), (counts, costs))
             retained_file.write_bytes(original_bytes)
+            os.utime(retained_file, ns=(original_mtime, original_mtime))
             self.monitor.deliver(self.monitor.pending()[0])
             self.assertEqual(self.totals(), (counts, costs))
         saved = directory.rename(directory.with_name("saved"))
@@ -400,6 +402,78 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals(), (counts, costs))
+
+    def test_antigravity_suspicious_attribution_retains_tokens_without_pricing(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+        def blob(field, value):
+            return antigravity_projection.enc((field << 3) | 2) + antigravity_projection.enc(len(value)) + value
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        secret = b"ya29.fixture-token-value"
+        row = blob(1, blob(4, number(2, 100) + number(10, 10) + blob(11, b"fixture-response")) + blob(19, secret))
+        label_row = blob(1, blob(4, number(2, 20) + blob(11, b"fixture-label")) + blob(21, b"client_secret=fixture"))
+        valid_row = blob(1, blob(4, number(2, 40) + blob(11, b"fixture-valid")) + blob(19, b"gemini-3-flash-a"))
+        meta = blob(1, blob(1, b"file:///home/access_token/project"))
+        with closing(sqlite3.connect(directory / "fixture.db")) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            db.execute("CREATE TABLE trajectory_metadata_blob(data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (row,))
+            db.execute("INSERT INTO gen_metadata VALUES (1, ?)", (label_row,))
+            db.execute("INSERT INTO gen_metadata VALUES (2, ?)", (valid_row,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.assertEqual(self.monitor.deliver(self.monitor.pending()[0]), [])
+        period = self.device_record()["periods"]["allTime"]
+        self.assertEqual(period["clients"]["antigravity"], 170)
+        self.assertEqual(period["clientModels"]["antigravity"], {"unknown": 130, "gemini-3.5-flash-high": 40})
+        self.assertEqual(period["clientModelCosts"].get("antigravity", {}).get("unknown", 0), 0)
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(secret, path.read_bytes())
+                self.assertNotIn(b"access_token", path.read_bytes())
+
+    def test_antigravity_partial_failure_isolates_valid_usage(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+        def blob(field, value):
+            return antigravity_projection.enc((field << 3) | 2) + antigravity_projection.enc(len(value)) + value
+        def row(identity, tokens):
+            return blob(1, blob(4, number(2, tokens) + blob(11, identity)) + blob(19, b"gemini-3-flash-a"))
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        session = directory / "conflict.db"
+        with closing(sqlite3.connect(session)) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (row(b"first", 100),))
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.assertEqual(self.monitor.deliver(self.monitor.pending()[0]), [])
+        before, _ = self.totals()
+        with closing(sqlite3.connect(session)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (row(b"unrelated", 200),))
+        with closing(sqlite3.connect(directory / "independent.db")) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (row(b"second", 50),))
+        (directory / "malformed.db").write_bytes(b"not sqlite")
+        claude = json.loads(self.sources[0].read_text())
+        claude["requestId"] = "second-request"
+        claude["message"]["id"] = "second-message"
+        with self.sources[0].open("a") as stream:
+            stream.write(json.dumps(claude) + "\n")
+        self.publish()
+        issues = self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(len(issues), 2)
+        after, _ = self.totals()
+        self.assertEqual(after["antigravity"], before["antigravity"] + 50)
+        self.assertGreater(after["claude"], before["claude"])
+        self.assertEqual(after["codex"], before["codex"])
+        self.assertEqual(after["opencode"], before["opencode"])
+        self.assertEqual(len(list((self.monitor.collector_state / "antigravity-quarantine").glob("*.db"))), 1)
+        self.publish()
+        self.assertEqual(len(self.monitor.deliver(self.monitor.pending()[0])), 2)
+        self.assertEqual(self.totals()[0], after)
 
     def test_antigravity_explicit_orchestrator_and_worker_models(self):
         def varint(value):

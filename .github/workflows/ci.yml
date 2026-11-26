@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Repository tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml zstd
+      - name: Prepare auth storage test image
+        run: docker pull node:24-bookworm
+      - name: Check shell syntax
+        run: find scripts -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+      - name: Run repository tests
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+
+  token-monitor-integration:
+    name: Token Monitor integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Install fixture dependencies
+        run: sudo apt-get update && sudo apt-get install -y zstd
+      - name: Prepare pinned upstream Hub
+        run: |
+          git init -q "$RUNNER_TEMP/token-monitor"
+          git -C "$RUNNER_TEMP/token-monitor" fetch --depth 1 https://github.com/Javis603/token-monitor.git 49831523e3bbb3ec57ad6d30001306390592c59b
+          git -C "$RUNNER_TEMP/token-monitor" checkout -q --detach FETCH_HEAD
+          cd "$RUNNER_TEMP/token-monitor"
+          npm ci --omit=dev --ignore-scripts
+      - name: Build pinned collector
+        run: |
+          docker build --build-arg COLLECTOR_VERSION=v0.99.0 \
+            --build-arg COLLECTOR_REVISION=49831523e3bbb3ec57ad6d30001306390592c59b \
+            -t agent-sandbox-token-monitor:ci scripts/token-monitor
+      - name: Run isolated integration tests
+        run: |
+          sudo env "PATH=$PATH" \
+            "TOKEN_MONITOR_TEST_UPSTREAM=$RUNNER_TEMP/token-monitor" \
+            TOKEN_MONITOR_TEST_IMAGE=agent-sandbox-token-monitor:ci \
+            /usr/bin/python3 -m unittest discover -s tests -p 'test_token_monitor_integration.py' -v

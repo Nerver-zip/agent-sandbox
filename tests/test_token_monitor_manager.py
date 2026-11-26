@@ -166,6 +166,40 @@ class ConfigurationTest(unittest.TestCase):
             monitor.deliver(generation)
         self.assertTrue(generation.is_dir())
 
+    def test_final_capture_with_isolated_conversation_failure_blocks_removal(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        monitor.snapshots.mkdir()
+        generation = monitor.snapshots / ("0" * 20 + "-" + "a" * 32)
+        generation.mkdir()
+        (generation / "issues.json").write_text(json.dumps(["a" * 64]))
+        fd = os.open(self.project, os.O_RDONLY)
+        with patch.object(manager, "open_workspace", return_value=fd), \
+             patch.object(manager, "docker"), patch.object(monitor, "publish"), \
+             self.assertRaisesRegex(manager.JobError, "final capture is incomplete"):
+            monitor.capture_workspace("fixture", 123, "start", stop=True)
+        status = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(status["antigravity_incomplete"], ["a" * 64])
+
+    def test_partial_delivery_reports_incomplete_without_failing_other_providers(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        monitor.snapshots.mkdir()
+        pending = monitor.snapshots / ("0" * 20 + "-" + "b" * 32)
+        pending.mkdir()
+        stderr = io.StringIO()
+        with patch.object(manager, "workspace", return_value=("fixture", 123, "start")), \
+             patch.object(monitor, "deliver", return_value=["a" * 64]), \
+             patch.object(sys, "stderr", stderr):
+            monitor.sync()
+        status = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(status["antigravity_incomplete"], ["a" * 64])
+        self.assertIn("incomplete", stderr.getvalue())
+
     def test_unit_setup_is_idempotent_and_uninstall_cleans_only_owned_units(self):
         with patch.object(manager, "systemctl") as systemctl:
             manager.manage_units()

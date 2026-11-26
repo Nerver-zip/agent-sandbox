@@ -142,11 +142,16 @@ class SnapshotTests(unittest.TestCase):
             snapshot.capture(self.fd, destination, None, ["antigravity"])
         self.assertFalse(destination.exists())
 
-    def test_credential_shaped_antigravity_filename_is_not_staged(self):
-        self.write(f"{snapshot.ANTIGRAVITY}/ya29.fixture-token-value.db", b"fixture")
-        with self.assertRaisesRegex(snapshot.SnapshotError, "filename is not safe"):
-            self.capture("unsafe-name", providers=["antigravity"])
-        self.assertFalse((self.tmp / "unsafe-name").exists())
+    def test_credential_shaped_antigravity_filename_is_pseudonymized(self):
+        directory = self.home / snapshot.ANTIGRAVITY
+        directory.mkdir(parents=True)
+        with closing(sqlite3.connect(directory / "ya29.fixture-token-value.db")) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+        target, _ = self.capture("unsafe-name", providers=["antigravity"])
+        names = [path.name for path in (target / "home" / snapshot.ANTIGRAVITY).glob("*.db")]
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].startswith("redacted-"))
+        self.assertNotIn("ya29", (target / "index.json").read_text())
 
     def test_antigravity_allowlist_and_wal_recovery(self):
         directory = self.home / snapshot.ANTIGRAVITY
@@ -235,6 +240,39 @@ class SnapshotTests(unittest.TestCase):
         captured, _ = self.capture("retry", providers=["antigravity"])
         with closing(sqlite3.connect(captured / "home" / snapshot.ANTIGRAVITY / "live.db")) as reader:
             self.assertEqual(reader.execute("SELECT idx FROM gen_metadata").fetchall(), [(1,), (2,)])
+
+    def test_malformed_conversation_preserves_previous_and_captures_others(self):
+        directory = self.home / snapshot.ANTIGRAVITY
+        directory.mkdir(parents=True)
+        for name in ("broken.db", "valid.db"):
+            with closing(sqlite3.connect(directory / name)) as db, db:
+                db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+                db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (b"\x0a\x04\x22\x02\x10\x01",))
+        first, _ = self.capture(providers=["antigravity"])
+        for name in ("broken.db", "valid.db"):
+            with closing(sqlite3.connect(directory / name)) as db, db:
+                db.execute("INSERT INTO gen_metadata VALUES (1, ?)", (b"\x0a\x04\x22\x02\x10\x02",))
+        original = self.sanitize_fixture
+        def sanitize(companions, target):
+            if companions[0][0] == "broken.db":
+                raise snapshot.ConversationError("invalid fixture")
+            original(companions, target)
+        with mock.patch.object(self, "sanitize_fixture", side_effect=sanitize):
+            second, _ = self.capture("partial", first, providers=["antigravity"])
+        issues = json.loads((second / "issues.json").read_text())
+        self.assertEqual(len(issues), 1)
+        self.assertNotIn("broken", issues[0])
+        for name, count in (("broken.db", 1), ("valid.db", 2)):
+            with closing(sqlite3.connect(second / "home" / snapshot.ANTIGRAVITY / name)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM gen_metadata").fetchone()[0], count)
+        saved = (directory / "broken.db").rename(self.tmp / "saved.db")
+        absent, _ = self.capture("absent", second, providers=["antigravity"])
+        self.assertEqual(json.loads((absent / "issues.json").read_text()), issues)
+        saved.rename(directory / "broken.db")
+        recovered, _ = self.capture("recovered", absent, providers=["antigravity"])
+        self.assertEqual(json.loads((recovered / "issues.json").read_text()), [])
+        with closing(sqlite3.connect(recovered / "home" / snapshot.ANTIGRAVITY / "broken.db")) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM gen_metadata").fetchone()[0], 2)
 
     def test_interrupted_capture_discards_generation(self):
         path = self.write(".codex/sessions/a.jsonl", b"{}\n")

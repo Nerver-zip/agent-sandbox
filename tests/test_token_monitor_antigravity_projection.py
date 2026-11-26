@@ -40,15 +40,27 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(projection.project(step, projection.STEP),
                          blob(1, timestamp) + blob(9, blob(11, projection.response_id(b"response"))) + blob(20, scalar(3, 4)))
 
-    def test_credential_shaped_model_and_workspace_fail_closed(self):
+    def test_credential_shaped_attribution_is_discarded(self):
         for data, schema in ((blob(19, b"Bearer fixture-private-value"), projection.CHAT),
                              (blob(1, blob(1, b"file:///home/access_token/project")), projection.TRAJECTORY),
                              (blob(1, blob(1, b"file:///home/access%5ftoken/project")), projection.TRAJECTORY),
                              (blob(19, b"1//abcdefghijklmnopqrstuvwxyz012345"), projection.CHAT),
                              (blob(1, blob(1, b"file:///home/eyJabcdefghijk.eyJabcdefghijk.abcdefghijk")), projection.TRAJECTORY),
                              (blob(21, b"client_secret=fixture"), projection.CHAT)):
-            with self.subTest(schema=schema), self.assertRaisesRegex(ValueError, "credential-shaped"):
-                projection.project(data, schema)
+            with self.subTest(schema=schema):
+                projected = projection.project(data, schema)
+                self.assertNotIn(b"fixture", projected)
+                self.assertNotIn(b"eyJ", projected)
+                self.assertNotIn(b"access", projected)
+                self.assertNotIn(b"1//", projected)
+        self.assertEqual(projection.project(blob(19, b"Bearer fixture-private-value"), projection.CHAT),
+                         blob(19, b"unknown"))
+        bad_label = blob(21, b"access_token=fixture")
+        self.assertEqual(projection.project(bad_label, projection.CHAT), blob(19, b"unknown"))
+        self.assertEqual(projection.project(blob(19, b"gemini-default") + bad_label, projection.CHAT),
+                         blob(19, b"unknown"))
+        self.assertEqual(projection.project(blob(19, b"gemini-3-flash-a") + bad_label, projection.CHAT),
+                         blob(19, b"gemini-3-flash-a"))
 
     def test_inferred_clock_projects_nested_unknown_fields(self):
         nested = scalar(1, 1781502653) + blob(3, b"fixture-private-value")
@@ -84,6 +96,16 @@ class ProjectionTest(unittest.TestCase):
                 self.assertEqual(names, {"gen_metadata", "steps"})
                 self.assertEqual(db.execute("SELECT data FROM gen_metadata").fetchone()[0],
                                  blob(1, blob(4, scalar(2, 15))))
+
+    def test_invalid_sqlite_types_do_not_enter_projected_database(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source.db"
+            target = Path(temp) / "projected.db"
+            with closing(sqlite3.connect(source)) as db, db:
+                db.execute("CREATE TABLE gen_metadata(idx, data)")
+                db.execute("INSERT INTO gen_metadata VALUES (?,?)", ("not-an-integer", b""))
+            with self.assertRaises(ValueError):
+                projection.project_database(source, target)
 
     def test_packed_step_index_discards_unneeded_trailing_bytes(self):
         packed = projection.enc(37) + b"fixture-private-value"

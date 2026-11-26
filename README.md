@@ -390,7 +390,7 @@ Push or back up workspace changes before updating, as recreating the container r
 
 ## Token Monitor
 
-Optional [Token Monitor accounting](docs/TOKEN_MONITOR.md) reports Claude Code, Codex, OpenCode and Antigravity CLI usage to an independent Hub. Configure it once on the Docker host to preserve usage across sandbox resets. Use the lifecycle scripts below so they can capture final usage before removing the workspace. Antigravity collection remains under review; see the guide's security blocker before enabling it.
+Optional [Token Monitor accounting](docs/TOKEN_MONITOR.md) reports Claude Code, Codex, OpenCode and Antigravity CLI usage to an independent Hub. Configure it once on the Docker host to preserve usage across sandbox resets. Use the lifecycle scripts below so they can capture final usage before removing the workspace. See the guide for attribution, partial-failure recovery and inherited upstream limitations.
 
 ## Container lifecycle
 
@@ -451,6 +451,8 @@ To run the static test suite:
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+GitHub Actions runs the repository tests and shell syntax checks on pushes to `main` and pull requests. A separate job builds the pinned Token Monitor collector and exercises its isolated integration fixtures; Gitleaks scans Git history in another job. The integration job does not access a production sandbox.
 
 The script `verify.sh` checks mounts, capabilities, tool availability, and host firewall rules. Test network restrictions directly from inside the container before running untrusted workloads.
 

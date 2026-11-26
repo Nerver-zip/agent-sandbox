@@ -1,6 +1,7 @@
 """Prepare a private scan home and run the official networkless agent."""
 
 import importlib.util
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -67,7 +68,30 @@ def prepare():
         marker = DATA / "antigravity-usage-required"
         if marker.exists() and not archive.is_dir():
             raise antigravity_archive.ArchiveError("The Antigravity usage archive is missing", 74)
-        retained = antigravity_archive.update(conversations, archive, require_index=marker.exists())
+        conflicts = []
+        retained = antigravity_archive.update(conversations, archive, require_index=marker.exists(), conflicts=conflicts)
+        quarantine = DATA / "antigravity-quarantine"
+        quarantine.mkdir(exist_ok=True)
+        for source in conversations.glob("*.db"):
+            identity = hashlib.sha256(os.fsencode(source.name)).hexdigest()
+            if identity not in conflicts:
+                continue
+            digest = antigravity_archive.checksum(source)
+            candidate = f"{identity}-{digest}-{source.stat().st_mtime_ns}"
+            target = quarantine / f"{candidate}.db"
+            if not target.exists():
+                if sum(item.stat().st_size for item in quarantine.glob("*.db")) + source.stat().st_size > antigravity_archive.MAX_BYTES:
+                    raise antigravity_archive.ArchiveError("Antigravity recovery storage exceeds its limit", 72)
+                temporary = quarantine / f".{candidate}.tmp"
+                shutil.copy2(source, temporary)
+                with temporary.open("rb") as file:
+                    os.fsync(file.fileno())
+                os.replace(temporary, target)
+            antigravity_archive.durable_json(quarantine / f"{identity}.json", {"name": source.name})
+        # Retained candidates remain visible until explicitly recovered; a
+        # missing source must not make an unresolved conflict disappear.
+        unresolved = sorted({path.name.split("-", 1)[0] for path in quarantine.glob("*.db")})
+        antigravity_archive.durable_json(DATA / "antigravity-issues.json", unresolved)
         if not marker.exists():
             with marker.open("x") as file:
                 file.write("1\n")

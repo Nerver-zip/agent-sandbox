@@ -188,28 +188,35 @@ def verify_checksum(path, *, legacy=False):
     state = state_path(path)
     try:
         digest = checksum(path)
+        mtime = path.stat().st_mtime_ns
     except OSError:
         raise ArchiveError("The Antigravity usage archive is unreadable; restore it from backup", 74) from None
     if not state.exists() and legacy:
-        durable_json(state, {"name": path.name, "hashes": [digest]})
+        durable_json(state, {"name": path.name, "hashes": [digest], "mtimes": [mtime]})
         return digest
     try:
         value = json.loads(state.read_text())
         hashes = value["hashes"]
+        mtimes = value.get("mtimes")
         if (value.get("name") != path.name or not isinstance(hashes, list)
                 or not 1 <= len(hashes) <= 2
                 or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in hashes)
-                or digest not in hashes):
+                or digest not in hashes
+                or (mtimes is not None and (not isinstance(mtimes, list) or len(mtimes) != len(hashes)
+                    or any(type(item) is not int for item in mtimes)
+                    or (digest, mtime) not in zip(hashes, mtimes)))):
             raise ValueError("archive checksum mismatch")
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         raise ArchiveError("The Antigravity usage archive is incomplete or corrupt; restore it from backup", 74) from None
-    if len(hashes) != 1:
+    if len(hashes) != 1 or mtimes is None:
         # A previous interruption occurred on either side of an atomic replace.
-        durable_json(state, {"name": path.name, "hashes": [digest]})
+        # Old checksum records did not protect mtime; their current value is
+        # the only available migration baseline.
+        durable_json(state, {"name": path.name, "hashes": [digest], "mtimes": [mtime]})
     return digest
 
 
-def update(source_dir, archive_dir, *, require_index=False):
+def update(source_dir, archive_dir, *, require_index=False, conflicts=None):
     """Atomically retain compatible observations; return retained DB paths.
 
     A divergent version cannot be merged safely using opaque upstream records.
@@ -292,20 +299,28 @@ def update(source_dir, archive_dir, *, require_index=False):
                 os.fsync(file.fileno())
             new_hash = checksum(temp)
             previous_hash = hashes.get(dest.name)
-            allowed = list(dict.fromkeys(item for item in (previous_hash, new_hash) if item))
+            new_mtime = temp.stat().st_mtime_ns
+            previous = (previous_hash, dest.stat().st_mtime_ns) if previous_hash else None
+            allowed = list(dict.fromkeys(item for item in (previous, (new_hash, new_mtime)) if item))
             # Write-ahead permits either complete version after a crash.
-            durable_json(state_path(dest), {"name": dest.name, "hashes": allowed})
+            durable_json(state_path(dest), {"name": dest.name, "hashes": [item[0] for item in allowed],
+                                            "mtimes": [item[1] for item in allowed]})
             os.replace(temp, dest)
             directory = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-            durable_json(state_path(dest), {"name": dest.name, "hashes": [new_hash]})
+            durable_json(state_path(dest), {"name": dest.name, "hashes": [new_hash], "mtimes": [new_mtime]})
             hashes[dest.name] = new_hash
             used += size - old_size
             if not old_size:
                 retained.append(dest)
+        except ArchiveError as exc:
+            if exc.exit_code != 73 or conflicts is None:
+                raise
+            # Do not expose an untrusted filename in diagnostics.
+            conflicts.append(hashlib.sha256(os.fsencode(source.name)).hexdigest())
         finally:
             temp.unlink(missing_ok=True)
     retained = sorted(archive_dir.glob("*.db"))

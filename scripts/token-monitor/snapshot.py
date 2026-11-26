@@ -41,6 +41,10 @@ class SnapshotError(Exception):
     pass
 
 
+class ConversationError(SnapshotError):
+    """One Antigravity database could not be projected safely."""
+
+
 def mount_id(fd):
     with open(f"/proc/self/fdinfo/{fd}", encoding="ascii") as info:
         for line in info:
@@ -99,6 +103,8 @@ class Snapshot:
         self.entries = 0
         self.bytes = 0
         self.copied = 0
+        issues_path = previous / "issues.json" if previous else None
+        self.issues = set(json.loads(issues_path.read_text())) if issues_path and issues_path.exists() else set()
 
     def names(self, fd):
         with os.scandir(fd) as entries:
@@ -177,12 +183,9 @@ class Snapshot:
         for entry in self.names(fd):
             if not pattern.fullmatch(entry.name):
                 continue
-            if relative == ANTIGRAVITY:
-                try:
-                    if projection.safe_text(os.fsencode(entry.name)) is None:
-                        raise ValueError("invalid session filename")
-                except ValueError:
-                    raise SnapshotError("Antigravity session filename is not safe to persist") from None
+            staged_name = entry.name
+            if relative == ANTIGRAVITY and projection.safe_text(os.fsencode(entry.name)) is None:
+                staged_name = "redacted-" + hashlib.sha256(os.fsencode(entry.name)).hexdigest() + ".db"
             base, base_info = self.open_regular(fd, entry.name)
             if base is None:
                 continue
@@ -195,10 +198,11 @@ class Snapshot:
                     companions.append((name, source, info))
                 group = [info for _, _, info in companions]
                 if relative == ANTIGRAVITY:
+                    issue_id = hashlib.sha256(os.fsencode(entry.name)).hexdigest()
                     if self.sanitizer is None:
                         raise SnapshotError("Antigravity requires an isolated metadata sanitizer")
                     key = {"format": "agy-projection-v1", "sanitizer": SANITIZER_REVISION, "source": group}
-                    path = f"{relative}/{entry.name}"
+                    path = f"{relative}/{staged_name}"
                     target = self.destination / "home" / path
                     target.parent.mkdir(parents=True, exist_ok=True)
                     total = sum(info[2] for _, source, info in companions if source is not None)
@@ -208,7 +212,17 @@ class Snapshot:
                     if self.old_index.get(path) == key:
                         os.link(self.previous / "home" / path, target)
                     else:
-                        self.sanitizer(companions, target)
+                        try:
+                            self.sanitizer(companions, target)
+                        except ConversationError:
+                            target.unlink(missing_ok=True)
+                            self.issues.add(issue_id)
+                            # Keep the last verified observation, if available,
+                            # and retain its old source key so the next sync retries.
+                            if self.previous and path in self.old_index:
+                                os.link(self.previous / "home" / path, target)
+                                self.index[path] = self.old_index[path]
+                            continue
                         if target.stat().st_size > MAX_FILE:
                             raise SnapshotError("Projected usage exceeds the snapshot byte limit")
                         os.utime(target, ns=(base_info[3], base_info[3]))
@@ -216,6 +230,7 @@ class Snapshot:
                             os.fsync(output.fileno())
                         self.copied += total
                     self.index[path] = key
+                    self.issues.discard(issue_id)
                 else:
                     for name, source, info in companions:
                         if source is not None:
@@ -282,6 +297,10 @@ def capture(root_fd, destination: Path, previous: Path | None, providers, saniti
             json.dump(snapshot.index, index)
             index.flush()
             os.fsync(index.fileno())
+        with (destination / "issues.json").open("x") as issues:
+            json.dump(sorted(snapshot.issues), issues)
+            issues.flush()
+            os.fsync(issues.fileno())
         for directory, _, _ in os.walk(destination, topdown=False):
             fd = os.open(directory, DIR_FLAGS)
             try:

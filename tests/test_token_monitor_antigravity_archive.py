@@ -1,5 +1,6 @@
 from contextlib import closing
 import importlib.util
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -89,6 +90,22 @@ class AntigravityArchiveTest(unittest.TestCase):
         with self.assertRaisesRegex(archive.ArchiveError, "metadata"):
             archive.update(self.source, self.retained)
         self.assertEqual(self.read_rows(), [(0, b"first")])
+
+    def test_conflicting_conversation_preserves_old_and_accepts_independent_session(self):
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (b"incompatible",))
+        other = self.source / "other.db"
+        with closing(sqlite3.connect(other)) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES(0, ?)", (b"independent",))
+        conflicts = []
+        archive.update(self.source, self.retained, conflicts=conflicts)
+        self.assertEqual(self.read_rows(), [(0, b"first")])
+        self.assertEqual(len(conflicts), 1)
+        self.assertNotIn("session", conflicts[0])
+        with closing(sqlite3.connect(self.retained / other.name)) as db:
+            self.assertEqual(db.execute("SELECT data FROM gen_metadata").fetchall(), [(b"independent",)])
 
     def test_disjoint_identified_generations_merge_with_stable_anchor(self):
         p = archive.projection
@@ -238,6 +255,18 @@ class AntigravityArchiveTest(unittest.TestCase):
             archive.update(self.source, self.retained, require_index=True)
         self.assertEqual(error.exception.exit_code, 74)
 
+    def test_changed_retained_mtime_stops_collection(self):
+        archive.update(self.source, self.retained)
+        retained = self.retained / self.db.name
+        original = retained.stat().st_mtime_ns
+        os.utime(retained, ns=(original + 10_000_000_000, original + 10_000_000_000))
+        self.db.unlink()
+        with self.assertRaises(archive.ArchiveError) as error:
+            archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(error.exception.exit_code, 74)
+        os.utime(retained, ns=(original, original))
+        archive.update(self.source, self.retained, require_index=True)
+
     def test_interruption_before_database_replace_recovers_valid_old_version(self):
         archive.update(self.source, self.retained)
         with closing(sqlite3.connect(self.db)) as db, db:
@@ -253,6 +282,26 @@ class AntigravityArchiveTest(unittest.TestCase):
         self.assertEqual(self.read_rows(), [(0, b"first")])
         archive.update(self.source, self.retained, require_index=True)
         self.assertEqual(self.read_rows(), [(0, b"first"), (1, b"new")])
+
+    def test_interrupted_mtime_only_update_retains_both_valid_versions(self):
+        archive.update(self.source, self.retained)
+        retained = self.retained / self.db.name
+        old_mtime = retained.stat().st_mtime_ns
+        new_mtime = old_mtime + 10_000_000_000
+        os.utime(self.db, ns=(new_mtime, new_mtime))
+        replace = archive.os.replace
+        def interrupt_database(source, target):
+            if Path(target) == retained:
+                raise OSError("interrupted before database replace")
+            return replace(source, target)
+        with patch.object(archive.os, "replace", side_effect=interrupt_database):
+            with self.assertRaises(OSError):
+                archive.update(self.source, self.retained)
+        state = __import__("json").loads(archive.state_path(retained).read_text())
+        self.assertEqual(state["hashes"][0], state["hashes"][1])
+        self.assertEqual(state["mtimes"], [old_mtime, new_mtime])
+        archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(retained.stat().st_mtime_ns, new_mtime)
 
     def test_interruption_after_database_replace_recovers_valid_new_version(self):
         archive.update(self.source, self.retained)

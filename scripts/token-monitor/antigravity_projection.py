@@ -48,7 +48,7 @@ def enc(n):
 
 
 def safe_text(value):
-    """Reject known credential-shaped text in scanner-visible string fields.
+    """Drop known credential-shaped text from scanner-visible string fields.
 
     This is defense in depth, not a proof that arbitrary strings are secret-free.
     """
@@ -56,7 +56,7 @@ def safe_text(value):
     from urllib.parse import unquote
 
     if len(value) > 4096:
-        raise ValueError("oversized scanner string")
+        return None
     try:
         text = value.decode("utf-8")
     except UnicodeDecodeError:
@@ -69,7 +69,31 @@ def safe_text(value):
         r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
     )
     if any(re.search(pattern, decoded) for pattern in patterns):
-        raise ValueError("credential-shaped scanner string")
+        return None
+    return value
+
+
+def model_id(value):
+    import re
+    value = safe_text(value)
+    if value is None or len(value) > 256 or not re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9._:/-]*", value):
+        # Explicit unknown prevents the upstream session-level fallback from
+        # assigning a different priced model to this generation.
+        return b"unknown"
+    return value
+
+
+def model_label(value):
+    value = safe_text(value)
+    if value is None or len(value) > 256 or any(byte < 32 or byte == 127 for byte in value):
+        return None
+    return value
+
+
+def workspace_uri(value):
+    value = safe_text(value)
+    if value is None or not value.startswith(b"file://") or any(byte < 32 or byte == 127 for byte in value):
+        return None
     return value
 
 
@@ -86,6 +110,8 @@ def response_id(value, *, strip=False):
     """Keep stable deduplication without persisting provider response IDs."""
     import hashlib
 
+    if len(value) > 4096:
+        raise ValueError("oversized response identifier")
     try:
         text = value.decode("utf-8")
     except UnicodeDecodeError:
@@ -99,7 +125,11 @@ def response_id(value, *, strip=False):
 
 def project(data, schema):
     out = bytearray()
-    for number, wire, value, raw in fields(data):
+    parsed = list(fields(data))
+    bad_label = schema is CHAT and any(number == 21 and wire == 2 and model_label(value) is None
+                                      for number, wire, value, _ in parsed)
+    model_seen = False
+    for number, wire, value, raw in parsed:
         rule = schema.get(number)
         if rule is None: continue
         if isinstance(rule, dict):
@@ -122,6 +152,10 @@ def project(data, schema):
             if wire != 2:
                 raise ValueError("unexpected bytes wire type")
             projected = rule(value)
+            if schema is CHAT and number == 19:
+                model_seen = True
+                if bad_label and projected.lower() == b"gemini-default":
+                    projected = b"unknown"
             if projected is not None:
                 out.extend(enc((number << 3) | 2))
                 out.extend(enc(len(projected)))
@@ -130,6 +164,8 @@ def project(data, schema):
             out.extend(raw)
         else:
             raise ValueError("unexpected scalar wire type")
+    if bad_label and not model_seen:
+        out.extend(enc((19 << 3) | 2)); out.extend(enc(7)); out.extend(b"unknown")
     return bytes(out)
 
 V = {0}
@@ -137,9 +173,9 @@ BYTES = {2}
 TIMESTAMP = {1: V, 2: V}
 USAGE = {1: V, 2: V, 3: V, 4: V, 5: V, 9: V, 10: V, 11: response_id}
 CHAT = {4: USAGE, 9: {4: TIMESTAMP, 10: inferred_clock}, 11: TIMESTAMP,
-        12: TIMESTAMP, 19: safe_text, 21: safe_text}
+        12: TIMESTAMP, 19: model_id, 21: model_label}
 GEN = {1: CHAT, 2: (0, 2)}
-TRAJECTORY = {1: {1: safe_text}, 2: TIMESTAMP}
+TRAJECTORY = {1: {1: workspace_uri}, 2: TIMESTAMP}
 STEP = {1: TIMESTAMP, 9: {11: lambda value: response_id(value, strip=True)}, 20: {3: V}}
 
 
@@ -153,6 +189,16 @@ def project_database(source, target):
     from contextlib import closing
     import sqlite3
 
+    def integer(value):
+        if value is not None and type(value) is not int:
+            raise ValueError("invalid SQLite integer")
+        return value
+
+    def blob(value):
+        if not isinstance(value, bytes) or len(value) > 16 * 1024 * 1024:
+            raise ValueError("invalid SQLite blob")
+        return value
+
     with closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)) as src, \
             closing(sqlite3.connect(target)) as dst, dst:
         src.execute("PRAGMA trusted_schema=OFF")
@@ -161,15 +207,15 @@ def project_database(source, target):
             return False
         dst.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
         for idx, data in src.execute("SELECT idx,data FROM gen_metadata ORDER BY idx"):
-            dst.execute("INSERT INTO gen_metadata VALUES (?,?)", (idx, project(data, GEN)))
+            dst.execute("INSERT INTO gen_metadata VALUES (?,?)", (integer(idx), project(blob(data), GEN)))
         if "trajectory_metadata_blob" in names:
             dst.execute("CREATE TABLE trajectory_metadata_blob(data BLOB)")
             for (data,) in src.execute("SELECT data FROM trajectory_metadata_blob LIMIT 1"):
-                dst.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (project(data, TRAJECTORY),))
+                dst.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (project(blob(data), TRAJECTORY),))
         if "steps" in names:
             dst.execute("CREATE TABLE steps(idx INTEGER, step_type INTEGER, metadata BLOB)")
             for idx, kind, data in src.execute("SELECT idx,step_type,metadata FROM steps WHERE metadata IS NOT NULL"):
-                dst.execute("INSERT INTO steps VALUES (?,?,?)", (idx, kind, project(data, STEP)))
+                dst.execute("INSERT INTO steps VALUES (?,?,?)", (integer(idx), integer(kind), project(blob(data), STEP)))
     return True
 
 

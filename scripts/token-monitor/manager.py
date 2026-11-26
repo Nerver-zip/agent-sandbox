@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from relay import Hub, HubError, relay
-from snapshot import ANTIGRAVITY, ROOTS, SnapshotError, capture
+from snapshot import ANTIGRAVITY, ROOTS, ConversationError, SnapshotError, capture
 
 PROJECT = Path(__file__).resolve().parents[2]
 CONFIG = PROJECT / ".token-monitor.json"
@@ -407,8 +407,10 @@ class Monitor:
                 raise SnapshotError("Antigravity sanitizer timed out") from None
             finally:
                 writer.join(timeout=10)
-            if writer.is_alive() or status or errors:
+            if writer.is_alive() or errors:
                 raise SnapshotError("Antigravity metadata sanitizer failed")
+            if status:
+                raise ConversationError("Antigravity conversation could not be projected")
             output.flush()
             if output.tell() == 0:
                 raise SnapshotError("Antigravity metadata sanitizer returned no database")
@@ -426,7 +428,9 @@ class Monitor:
         try:
             files, copied = capture(root, staging, previous, self.config["providers"], self.sanitize_antigravity)
             if existing and previous is not None and copied == 0:
-                if filecmp.cmp(staging / "index.json", previous / "index.json", shallow=False):
+                if (filecmp.cmp(staging / "index.json", previous / "index.json", shallow=False)
+                        and (previous / "issues.json").is_file()
+                        and filecmp.cmp(staging / "issues.json", previous / "issues.json", shallow=False)):
                     return
             durable_json(staging / "capture.json", {"files": files, "copied_bytes": copied})
             (staging / "container").write_text(container)
@@ -455,6 +459,8 @@ class Monitor:
         # Draft versions staged raw Antigravity databases. Never deliver a
         # queued legacy generation as if it had passed the projector.
         index = json.loads((generation / "index.json").read_text())
+        issues_path = generation / "issues.json"
+        issues = json.loads(issues_path.read_text()) if issues_path.exists() else []
         for path, value in index.items():
             if path.startswith(ANTIGRAVITY + "/"):
                 if (not path.endswith(".db") or not isinstance(value, dict)
@@ -467,11 +473,15 @@ class Monitor:
                 if not server.acknowledged:
                     result = f"HTTP {server.last_status}" if server.last_status else "no ingest request"
                     raise JobError(f"Hub did not acknowledge usage ({result}).")
+        archive_issues = self.collector_state / "antigravity-issues.json"
+        if "antigravity" in self.config["providers"] and archive_issues.exists():
+            issues = sorted(set(issues) | set(json.loads(archive_issues.read_text())))
         previous = self.snapshots / "acknowledged"
         if previous.exists():
             shutil.rmtree(previous)
         os.rename(generation, previous)
         sync_dir(self.snapshots)
+        return issues
 
     def _collect(self, generation, relay_dir):
         try:
@@ -527,7 +537,7 @@ class Monitor:
                 queue = self.pending()
             if queue:
                 try:
-                    self.deliver(queue[0])
+                    issues = self.deliver(queue[0])
                 except (JobError, OSError, subprocess.TimeoutExpired):
                     # Capture bounded changes while the Hub is offline.
                     # Leave one slot for the next controlled shutdown.
@@ -537,8 +547,22 @@ class Monitor:
                         except (SnapshotError, JobError, OSError, subprocess.TimeoutExpired):
                             pass  # Preserve the original failure and oldest retry.
                     raise
-                self.save_status(last_success=int(time.time()), error=None, failures=0,
+                for pending in self.pending():
+                    pending_issues = pending / "issues.json"
+                    if pending_issues.exists():
+                        issues = sorted(set(issues) | set(json.loads(pending_issues.read_text())))
+                diagnostic = (f"Antigravity accounting is incomplete: {len(issues)} conversation(s) need recovery."
+                              if issues else None)
+                self.save_status(last_success=int(time.time()), error=diagnostic, failures=0,
+                                 antigravity_incomplete=issues,
                                  retry_after=0 if len(queue) > 1 else now + self.config["interval"])
+                if diagnostic:
+                    print(f"Warning: {diagnostic} See token-monitor.sh status.", file=os.sys.stderr)
+                if final and issues:
+                    final_marker.unlink(missing_ok=True)
+                    sync_dir(STATE)
+                    self.final_captured = False
+                    raise JobError("Antigravity accounting is incomplete; recover isolated conversations before removal.")
                 if final and len(queue) > 1:
                     print("Warning: older usage synchronized. The final snapshot is queued for automatic recovery.")
             if not source or not source[1] or final:
@@ -569,6 +593,13 @@ class Monitor:
                 # so even its last flushed writes are available before removal.
                 docker(["stop", "--time", "30", container], timeout=40)
             self.publish(root, container)
+            if stop:
+                newest = self.pending()[-1]
+                issues_path = newest / "issues.json"
+                issues = json.loads(issues_path.read_text()) if issues_path.exists() else []
+                if issues:
+                    self.save_status(antigravity_incomplete=issues)
+                    raise JobError("Antigravity final capture is incomplete; repair the listed conversations and retry.")
         finally:
             os.close(root)
 

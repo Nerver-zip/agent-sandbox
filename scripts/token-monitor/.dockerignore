@@ -2,3 +2,4 @@
 !Dockerfile
 !collect.py
 !restore.cjs
+!antigravity_archive.py

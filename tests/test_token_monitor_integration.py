@@ -157,10 +157,7 @@ class OfficialCollectorTest(unittest.TestCase):
     def test_antigravity_upgrade_retention_and_restore(self):
         self.check_antigravity_retention(remove_one=False)
 
-    @unittest.expectedFailure
     def test_antigravity_duplicate_survives_partial_source_deletion(self):
-        # Known archive limitation: the surviving copy is counted alongside
-        # the archived session after the scanner's chosen source disappears.
         self.check_antigravity_retention(remove_one=True)
 
     def check_antigravity_retention(self, remove_one):
@@ -241,6 +238,15 @@ class OfficialCollectorTest(unittest.TestCase):
             self.assertEqual(self.totals(), (counts, costs))
             moved.rename(first_db)
             self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            compact = self.monitor.collector_state / "antigravity-usage"
+            backup = compact.rename(compact.with_name("usage-backup"))
+            self.publish()
+            with self.assertRaisesRegex(manager.JobError, "usage archive is missing"):
+                self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            backup.rename(compact)
             self.monitor.deliver(self.monitor.pending()[0])
             self.assertEqual(self.totals(), (counts, costs))
         saved = directory.rename(directory.with_name("saved"))

@@ -153,6 +153,14 @@ def docker(args, timeout=15, *, show=False, discard=False):
         env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/root"},
     )
     if result.returncode:
+        if args[0] == "run" and "--network=none" in args:
+            archive_errors = {
+                72: "Antigravity usage archive exceeds its limit.",
+                73: "Divergent Antigravity conversation versions require recovery.",
+                74: "The Antigravity usage archive is missing; restore it from backup.",
+            }
+            if result.returncode in archive_errors:
+                raise JobError(archive_errors[result.returncode])
         raise JobError(f"Docker {args[0]} failed.")
     return result.stdout
 
@@ -266,7 +274,7 @@ class Monitor:
         self.device = self.load_device()
         context = PROJECT / "scripts/token-monitor"
         source_hash = hashlib.sha256()
-        for name in ("Dockerfile", "collect.py", "restore.cjs"):
+        for name in ("Dockerfile", "collect.py", "restore.cjs", "antigravity_archive.py"):
             source_hash.update((context / name).read_bytes())
         self.image = f"agent-sandbox-token-monitor:{config['version']}-{source_hash.hexdigest()[:12]}"
         instance = hashlib.sha256(os.fsencode(PROJECT)).hexdigest()[:16]

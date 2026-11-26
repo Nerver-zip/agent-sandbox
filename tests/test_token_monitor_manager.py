@@ -1,11 +1,13 @@
+import io
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/token-monitor"))
@@ -43,6 +45,19 @@ class ConfigurationTest(unittest.TestCase):
         self.assertIsNone(manager.configuration())
         self.assertFalse(self.state.exists())
         self.assertEqual(list(self.units.iterdir()), [])
+
+    def test_provider_default_and_explicit_upgrade(self):
+        self.write()
+        self.assertEqual(manager.configuration()["providers"], ["claude", "codex", "opencode", "antigravity"])
+        self.write(providers=["claude", "codex", "opencode"])
+        self.assertEqual(manager.configuration()["providers"], ["claude", "codex", "opencode"])
+        self.write(providers=["claude", "codex", "opencode", "antigravity"])
+        self.assertEqual(manager.configuration()["providers"][-1], "antigravity")
+        self.write(collector_version="v0.98.0", providers=["antigravity"])
+        with self.assertRaisesRegex(manager.ConfigurationError, "requires the pinned collector version"):
+            manager.configuration()
+        self.write(collector_version="v0.98.0", providers=["claude"])
+        self.assertEqual(manager.configuration()["providers"], ["claude"])
 
     def test_projects_are_enabled_by_default_and_can_be_disabled(self):
         self.write()
@@ -90,6 +105,100 @@ class ConfigurationTest(unittest.TestCase):
         self.write(device_id="other-device")
         with self.assertRaises(manager.ConfigurationError):
             manager.Monitor(manager.configuration())
+
+    def test_sanitizer_cleanup_distinguishes_absent_from_live_worker(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        with patch.object(manager, "docker", side_effect=[manager.JobError("missing"), ""]):
+            monitor.remove_sanitizer("fixture-sanitizer")
+        with patch.object(manager, "docker", side_effect=[manager.JobError("failed"), "fixture-sanitizer\n"]):
+            with self.assertRaises(manager.JobError):
+                monitor.remove_sanitizer("fixture-sanitizer")
+        with patch.object(manager, "docker", side_effect=[manager.JobError("failed"), manager.JobError("daemon")]):
+            with self.assertRaises(manager.JobError):
+                monitor.remove_sanitizer("fixture-sanitizer")
+
+    def test_sanitizer_rejects_hosts_without_swap_limit(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        with patch.object(manager, "docker", return_value="false"), \
+             self.assertRaisesRegex(manager.SnapshotError, "swap-limit support"):
+            monitor.sanitize_antigravity([], self.project / "output")
+        self.assertFalse((self.project / "output").exists())
+
+    def test_sanitizer_timeout_removes_worker_and_kills_client(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        source = self.project / "fixture.db"
+        source.write_bytes(b"fixture")
+        fd = os.open(source, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        process = Mock()
+        process.stdin = io.BytesIO()
+        process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 1), 0]
+        with patch.object(manager, "docker", return_value="true"), patch.object(manager.subprocess, "Popen", return_value=process), \
+             patch.object(manager.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            with self.assertRaisesRegex(manager.SnapshotError, "timed out"):
+                monitor.sanitize_antigravity([("session.db", fd, [0, 0, 7, 0, 0]),
+                                            ("session.db-wal", None, None),
+                                            ("session.db-journal", None, None)], self.project / "output")
+        process.kill.assert_called_once()
+        self.assertIn("rm", run.call_args.args[0])
+
+    def test_legacy_raw_antigravity_snapshot_is_not_delivered(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        generation = self.state / "old-generation"
+        generation.mkdir()
+        (generation / "index.json").write_text(json.dumps({
+            ".gemini/antigravity-cli/conversations/session.db": [[1, 2, 3, 4, 5], None, None]
+        }))
+        with self.assertRaisesRegex(manager.JobError, "predates sanitization"):
+            monitor.deliver(generation)
+        self.assertTrue(generation.is_dir())
+
+    def test_final_capture_with_isolated_conversation_failure_blocks_removal(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        monitor.snapshots.mkdir()
+        generation = monitor.snapshots / ("0" * 20 + "-" + "a" * 32)
+        generation.mkdir()
+        (generation / "issues.json").write_text(json.dumps(["a" * 64]))
+        fd = os.open(self.project, os.O_RDONLY)
+        with patch.object(manager, "open_workspace", return_value=fd), \
+             patch.object(manager, "docker"), patch.object(monitor, "publish"), \
+             self.assertRaisesRegex(manager.JobError, "final capture is incomplete"):
+            monitor.capture_workspace("fixture", 123, "start", stop=True)
+        status = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(status["antigravity_incomplete"], ["a" * 64])
+
+    def test_partial_delivery_reports_incomplete_without_failing_other_providers(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        monitor.snapshots.mkdir()
+        pending = monitor.snapshots / ("0" * 20 + "-" + "b" * 32)
+        pending.mkdir()
+        stderr = io.StringIO()
+        with patch.object(manager, "workspace", return_value=("fixture", 123, "start")), \
+             patch.object(monitor, "deliver", return_value=["a" * 64]), \
+             patch.object(sys, "stderr", stderr):
+            monitor.sync()
+        status = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(status["antigravity_incomplete"], ["a" * 64])
+        self.assertIn("incomplete", stderr.getvalue())
 
     def test_unit_setup_is_idempotent_and_uninstall_cleans_only_owned_units(self):
         with patch.object(manager, "systemctl") as systemctl:

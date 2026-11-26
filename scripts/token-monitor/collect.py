@@ -1,10 +1,16 @@
 """Prepare a private scan home and run the official networkless agent."""
 
+import importlib.util
+import hashlib
 import os
 import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("antigravity_archive", "/opt/antigravity_archive.py")
+antigravity_archive = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(antigravity_archive)
 
 SNAPSHOT = Path("/snapshot")
 HOME = Path("/work/home")
@@ -25,34 +31,81 @@ def prepare():
         source = SNAPSHOT / name
         if source.exists():
             (HOME / name).symlink_to(source)
-    source = SNAPSHOT / ".local/share/opencode"
-    if not source.is_dir():
-        return
-    target = HOME / ".local/share/opencode"
-    target.mkdir(parents=True)
-    if (source / "storage").is_dir():
-        (target / "storage").symlink_to(source / "storage")
-    for db in source.glob("*.db"):
-        sidecars = [path for suffix in ("-wal", "-journal")
-                    if (path := db.with_name(db.name + suffix)).is_file()]
-        dest = target / db.name
-        if not sidecars:
-            dest.symlink_to(db)
+    for relative in (".local/share/opencode", ".gemini/antigravity-cli/conversations"):
+        source = SNAPSHOT / relative
+        if not source.is_dir():
             continue
-        shutil.copyfile(db, dest)
-        for sidecar in sidecars:
-            shutil.copyfile(sidecar, dest.with_name(sidecar.name))
-        # SQLite recovers the private copy using its own locks and SHM.
-        # It ignores an incomplete WAL transaction and rolls back a hot journal.
-        connection = sqlite3.connect(dest)
-        try:
-            connection.execute("PRAGMA trusted_schema=OFF")
-            connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if result[0] or connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
-                raise RuntimeError("Could not consolidate the OpenCode SQLite snapshot")
-        finally:
-            connection.close()
+        target = HOME / relative
+        target.mkdir(parents=True)
+        if (source / "storage").is_dir():
+            (target / "storage").symlink_to(source / "storage")
+        for db in source.glob("*.db"):
+            sidecars = [path for suffix in ("-wal", "-journal")
+                        if (path := db.with_name(db.name + suffix)).is_file()]
+            dest = target / db.name
+            if not sidecars and relative == ".local/share/opencode":
+                dest.symlink_to(db)
+                continue
+            shutil.copyfile(db, dest)
+            for sidecar in sidecars:
+                shutil.copyfile(sidecar, dest.with_name(sidecar.name))
+            # Recover only a private copy; SQLite ignores incomplete WAL transactions.
+            connection = sqlite3.connect(dest)
+            try:
+                connection.execute("PRAGMA trusted_schema=OFF")
+                connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+                result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if result[0] or connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
+                    raise RuntimeError("Could not consolidate the SQLite usage snapshot")
+            finally:
+                connection.close()
+            os.utime(dest, ns=(db.stat().st_mtime_ns, db.stat().st_mtime_ns))
+
+    if "antigravity" in os.environ["TOKEN_MONITOR_CLIENTS"].split(","):
+        conversations = HOME / ".gemini/antigravity-cli/conversations"
+        conversations.mkdir(parents=True, exist_ok=True)
+        archive = DATA / "antigravity-usage"
+        marker = DATA / "antigravity-usage-required"
+        if marker.exists() and not archive.is_dir():
+            raise antigravity_archive.ArchiveError("The Antigravity usage archive is missing", 74)
+        conflicts = []
+        retained = antigravity_archive.update(conversations, archive, require_index=marker.exists(), conflicts=conflicts)
+        quarantine = DATA / "antigravity-quarantine"
+        quarantine.mkdir(exist_ok=True)
+        for source in conversations.glob("*.db"):
+            identity = hashlib.sha256(os.fsencode(source.name)).hexdigest()
+            if identity not in conflicts:
+                continue
+            digest = antigravity_archive.checksum(source)
+            candidate = f"{identity}-{digest}-{source.stat().st_mtime_ns}"
+            target = quarantine / f"{candidate}.db"
+            if not target.exists():
+                if sum(item.stat().st_size for item in quarantine.glob("*.db")) + source.stat().st_size > antigravity_archive.MAX_BYTES:
+                    raise antigravity_archive.ArchiveError("Antigravity recovery storage exceeds its limit", 72)
+                temporary = quarantine / f".{candidate}.tmp"
+                shutil.copy2(source, temporary)
+                with temporary.open("rb") as file:
+                    os.fsync(file.fileno())
+                os.replace(temporary, target)
+            antigravity_archive.durable_json(quarantine / f"{identity}.json", {"name": source.name})
+        # Retained candidates remain visible until explicitly recovered; a
+        # missing source must not make an unresolved conflict disappear.
+        unresolved = sorted({path.name.split("-", 1)[0] for path in quarantine.glob("*.db")})
+        antigravity_archive.durable_json(DATA / "antigravity-issues.json", unresolved)
+        if not marker.exists():
+            with marker.open("x") as file:
+                file.write("1\n")
+                file.flush()
+                os.fsync(file.fileno())
+            directory = os.open(DATA, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        for path in conversations.glob("*.db"):
+            path.unlink()
+        for path in retained:
+            (conversations / path.name).symlink_to(path)
 
 
 def main():
@@ -80,13 +133,19 @@ def main():
             "TOKSCALE_PRICING_CACHE_ONLY": "1",
             "TZ": os.environ["TZ"],
         }
-        return subprocess.run(
+        code = subprocess.run(
             ["/usr/local/bin/node", "--require", "/opt/restore.cjs", "src/agent/agent.js", "--once"], env=env, check=False
         ).returncode
+        # Reserve these statuses for the local archive checks, so an upstream
+        # exit cannot be mistaken for a host recovery instruction.
+        return 1 if code in (72, 73, 74) else code
     finally:
         relay.terminate()
         relay.wait()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except antigravity_archive.ArchiveError as exc:
+        raise SystemExit(exc.exit_code)

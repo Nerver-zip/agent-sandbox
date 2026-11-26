@@ -10,6 +10,8 @@ import re
 import shutil
 import signal
 import stat
+import tarfile
+import threading
 import subprocess
 import tempfile
 import time
@@ -20,7 +22,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from relay import Hub, HubError, relay
-from snapshot import ROOTS, SnapshotError, capture
+from snapshot import ANTIGRAVITY, ROOTS, ConversationError, SnapshotError, capture
 
 PROJECT = Path(__file__).resolve().parents[2]
 CONFIG = PROJECT / ".token-monitor.json"
@@ -109,7 +111,9 @@ def configuration():
     if (not isinstance(providers, list) or not providers
             or any(not isinstance(name, str) or name not in ROOTS for name in providers)
             or len(set(providers)) != len(providers)):
-        raise ConfigurationError("providers must list distinct values from claude, codex and opencode.")
+        raise ConfigurationError("providers must list distinct values from claude, codex, opencode and antigravity.")
+    if "antigravity" in providers and version != DEFAULT_VERSION:
+        raise ConfigurationError("Antigravity metadata projection requires the pinned collector version.")
     projects_enabled = data.get("projects_enabled", True)
     if type(projects_enabled) is not bool:
         raise ConfigurationError("projects_enabled must be a boolean.")
@@ -153,6 +157,14 @@ def docker(args, timeout=15, *, show=False, discard=False):
         env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/root"},
     )
     if result.returncode:
+        if args[0] == "run" and "--network=none" in args:
+            archive_errors = {
+                72: "Antigravity usage archive exceeds its limit.",
+                73: "Divergent Antigravity conversation versions require recovery.",
+                74: "The Antigravity usage archive is missing; restore it from backup.",
+            }
+            if result.returncode in archive_errors:
+                raise JobError(archive_errors[result.returncode])
         raise JobError(f"Docker {args[0]} failed.")
     return result.stdout
 
@@ -266,11 +278,12 @@ class Monitor:
         self.device = self.load_device()
         context = PROJECT / "scripts/token-monitor"
         source_hash = hashlib.sha256()
-        for name in ("Dockerfile", "collect.py", "restore.cjs"):
+        for name in ("Dockerfile", "collect.py", "restore.cjs", "antigravity_archive.py", "antigravity_projection.py", "antigravity_sanitize.py"):
             source_hash.update((context / name).read_bytes())
         self.image = f"agent-sandbox-token-monitor:{config['version']}-{source_hash.hexdigest()[:12]}"
         instance = hashlib.sha256(os.fsencode(PROJECT)).hexdigest()[:16]
         self.container_name = f"agent-sandbox-token-monitor-{instance}"
+        self._sanitizer_name = None
 
     def require_session_archive(self):
         archive = self.collector_state / "archive"
@@ -321,6 +334,87 @@ class Monitor:
     def pending(self):
         return sorted(p for p in self.snapshots.iterdir() if GENERATION.fullmatch(p.name))
 
+    def remove_sanitizer(self, name):
+        """Remove our worker, accepting an already-removed container only."""
+        try:
+            docker(["rm", "-f", name], timeout=10)
+        except JobError:
+            present = docker(["ps", "-a", "--filter", f"name=^/{name}$", "--format", "{{.Names}}"], timeout=10)
+            if name in present.splitlines():
+                raise
+
+    def sanitize_antigravity(self, companions, target):
+        """Stream a stable DB and sidecars to an isolated tmpfs-only worker."""
+        if self._sanitizer_name is None:
+            if docker(["info", "--format", "{{json .SwapLimit}}"], timeout=10).strip() != "true":
+                raise SnapshotError("Antigravity sanitization requires Docker swap-limit support")
+            name = f"{self.container_name}-sanitize"
+            # The host lock serializes this installation. Remove a tmpfs-only
+            # worker left by an interrupted capture before starting a new one.
+            self.remove_sanitizer(name)
+            docker([
+                "run", "-d", "--rm", "--init", "--name", name, "--pull=never",
+                "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                "--pids-limit=32", "--memory=2g", "--memory-swap=2g", "--cpus=1.0", "--user", f"{UID}:{UID}",
+                "--log-driver=none", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
+                "--tmpfs", f"/work:rw,nosuid,nodev,noexec,size=1024m,uid={UID},gid={UID},mode=0700",
+                "--entrypoint", "/bin/sleep", self.image, "240",
+            ], timeout=RUN_TIMEOUT)
+            self._sanitizer_name = name
+        name = self._sanitizer_name
+        args = DOCKER + ["exec", "-i", "--user", f"{UID}:{UID}", name,
+                         "/usr/bin/python3", "-I", "/opt/antigravity_sanitize.py"]
+        errors = []
+        with target.open("xb") as output:
+            process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
+                                       env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/root"})
+
+            def stream():
+                try:
+                    with tarfile.open(fileobj=process.stdin, mode="w|") as archive:
+                        for index, (_, fd, info) in enumerate(companions):
+                            if fd is None:
+                                continue
+                            name = ("usage.db", "usage.db-wal", "usage.db-journal")[index]
+                            member = tarfile.TarInfo(name)
+                            member.size = info[2]
+                            os.lseek(fd, 0, os.SEEK_SET)
+                            with os.fdopen(os.dup(fd), "rb") as source:
+                                archive.addfile(member, source)
+                except (OSError, tarfile.TarError) as exc:
+                    errors.append(exc)
+                finally:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+
+            writer = threading.Thread(target=stream, daemon=True)
+            writer.start()
+            try:
+                status = process.wait(timeout=RUN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    removed = subprocess.run(DOCKER + ["rm", "-f", name], stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL, timeout=10, check=False)
+                    if removed.returncode == 0:
+                        self._sanitizer_name = None
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                finally:
+                    process.kill()
+                    process.wait(timeout=10)
+                raise SnapshotError("Antigravity sanitizer timed out") from None
+            finally:
+                writer.join(timeout=10)
+            if writer.is_alive() or errors:
+                raise SnapshotError("Antigravity metadata sanitizer failed")
+            if status:
+                raise ConversationError("Antigravity conversation could not be projected")
+            output.flush()
+            if output.tell() == 0:
+                raise SnapshotError("Antigravity metadata sanitizer returned no database")
+
     def publish(self, root, container):
         existing = self.pending()
         if len(existing) >= PENDING_LIMIT:
@@ -332,9 +426,11 @@ class Monitor:
         if staging.exists():
             shutil.rmtree(staging)
         try:
-            files, copied = capture(root, staging, previous, self.config["providers"])
+            files, copied = capture(root, staging, previous, self.config["providers"], self.sanitize_antigravity)
             if existing and previous is not None and copied == 0:
-                if filecmp.cmp(staging / "index.json", previous / "index.json", shallow=False):
+                if (filecmp.cmp(staging / "index.json", previous / "index.json", shallow=False)
+                        and (previous / "issues.json").is_file()
+                        and filecmp.cmp(staging / "issues.json", previous / "issues.json", shallow=False)):
                     return
             durable_json(staging / "capture.json", {"files": files, "copied_bytes": copied})
             (staging / "container").write_text(container)
@@ -352,8 +448,24 @@ class Monitor:
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+            if self._sanitizer_name is not None:
+                name, self._sanitizer_name = self._sanitizer_name, None
+                try:
+                    self.remove_sanitizer(name)
+                except (JobError, subprocess.TimeoutExpired):
+                    raise SnapshotError("Antigravity sanitizer cleanup failed") from None
 
     def deliver(self, generation):
+        # Draft versions staged raw Antigravity databases. Never deliver a
+        # queued legacy generation as if it had passed the projector.
+        index = json.loads((generation / "index.json").read_text())
+        issues_path = generation / "issues.json"
+        issues = json.loads(issues_path.read_text()) if issues_path.exists() else []
+        for path, value in index.items():
+            if path.startswith(ANTIGRAVITY + "/"):
+                if (not path.endswith(".db") or not isinstance(value, dict)
+                        or value.get("format") != "agy-projection-v1"):
+                    raise JobError("Queued Antigravity snapshot predates sanitization; preserve it for recovery.")
         with tempfile.TemporaryDirectory(prefix="relay-", dir=STATE) as directory:
             os.chmod(directory, 0o755)
             with relay(Path(directory) / "ingest.sock", self.hub, self.device) as server:
@@ -361,11 +473,15 @@ class Monitor:
                 if not server.acknowledged:
                     result = f"HTTP {server.last_status}" if server.last_status else "no ingest request"
                     raise JobError(f"Hub did not acknowledge usage ({result}).")
+        archive_issues = self.collector_state / "antigravity-issues.json"
+        if "antigravity" in self.config["providers"] and archive_issues.exists():
+            issues = sorted(set(issues) | set(json.loads(archive_issues.read_text())))
         previous = self.snapshots / "acknowledged"
         if previous.exists():
             shutil.rmtree(previous)
         os.rename(generation, previous)
         sync_dir(self.snapshots)
+        return issues
 
     def _collect(self, generation, relay_dir):
         try:
@@ -421,7 +537,7 @@ class Monitor:
                 queue = self.pending()
             if queue:
                 try:
-                    self.deliver(queue[0])
+                    issues = self.deliver(queue[0])
                 except (JobError, OSError, subprocess.TimeoutExpired):
                     # Capture bounded changes while the Hub is offline.
                     # Leave one slot for the next controlled shutdown.
@@ -431,8 +547,22 @@ class Monitor:
                         except (SnapshotError, JobError, OSError, subprocess.TimeoutExpired):
                             pass  # Preserve the original failure and oldest retry.
                     raise
-                self.save_status(last_success=int(time.time()), error=None, failures=0,
+                for pending in self.pending():
+                    pending_issues = pending / "issues.json"
+                    if pending_issues.exists():
+                        issues = sorted(set(issues) | set(json.loads(pending_issues.read_text())))
+                diagnostic = (f"Antigravity accounting is incomplete: {len(issues)} conversation(s) need recovery."
+                              if issues else None)
+                self.save_status(last_success=int(time.time()), error=diagnostic, failures=0,
+                                 antigravity_incomplete=issues,
                                  retry_after=0 if len(queue) > 1 else now + self.config["interval"])
+                if diagnostic:
+                    print(f"Warning: {diagnostic} See token-monitor.sh status.", file=os.sys.stderr)
+                if final and issues:
+                    final_marker.unlink(missing_ok=True)
+                    sync_dir(STATE)
+                    self.final_captured = False
+                    raise JobError("Antigravity accounting is incomplete; recover isolated conversations before removal.")
                 if final and len(queue) > 1:
                     print("Warning: older usage synchronized. The final snapshot is queued for automatic recovery.")
             if not source or not source[1] or final:
@@ -463,6 +593,13 @@ class Monitor:
                 # so even its last flushed writes are available before removal.
                 docker(["stop", "--time", "30", container], timeout=40)
             self.publish(root, container)
+            if stop:
+                newest = self.pending()[-1]
+                issues_path = newest / "issues.json"
+                issues = json.loads(issues_path.read_text()) if issues_path.exists() else []
+                if issues:
+                    self.save_status(antigravity_incomplete=issues)
+                    raise JobError("Antigravity final capture is incomplete; repair the listed conversations and retry.")
         finally:
             os.close(root)
 

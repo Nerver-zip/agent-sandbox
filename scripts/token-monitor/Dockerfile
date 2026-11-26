@@ -14,5 +14,5 @@ RUN npm ci --omit=dev --ignore-scripts \
     && rm -rf .git /root/.npm
 RUN TOKSCALE_CONFIG_DIR=/opt/tokscale-pricing node_modules/.bin/tokscale pricing refresh --json --no-spinner \
     && test -s /opt/tokscale-pricing/cache/pricing-litellm.json
-COPY collect.py restore.cjs /opt/
+COPY collect.py restore.cjs antigravity_archive.py antigravity_projection.py antigravity_sanitize.py /opt/
 ENTRYPOINT ["/usr/bin/python3", "-I", "/opt/collect.py"]

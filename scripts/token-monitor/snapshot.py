@@ -1,12 +1,22 @@
 """Copy the supported usage sources without traversing sandbox links or mounts."""
 
 import errno
+import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
 import stat
 from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("antigravity_projection", Path(__file__).with_name("antigravity_projection.py"))
+projection = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(projection)
+SANITIZER_REVISION = hashlib.sha256(
+    b"\0".join(Path(__file__).with_name(name).read_bytes() for name in
+               ("antigravity_projection.py", "antigravity_sanitize.py"))
+).hexdigest()
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -16,8 +26,10 @@ ROOTS = {
     "codex": ((".codex/sessions", (".jsonl", ".jsonl.zst"), 8),
               (".codex/archived_sessions", (".jsonl", ".jsonl.zst"), 8)),
     "opencode": ((".local/share/opencode/storage/message", ".json", 1),),
+    "antigravity": (),
 }
 OPENCODE = ".local/share/opencode"
+ANTIGRAVITY = ".gemini/antigravity-cli/conversations"
 SKIP_ERRORS = {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}
 MAX_ENTRIES = 500_000
 MAX_BYTES = 8 * 1024**3
@@ -27,6 +39,10 @@ COPY_CHUNK = 1024 * 1024
 
 class SnapshotError(Exception):
     pass
+
+
+class ConversationError(SnapshotError):
+    """One Antigravity database could not be projected safely."""
 
 
 def mount_id(fd):
@@ -75,8 +91,9 @@ def file_info(fd):
 
 
 class Snapshot:
-    def __init__(self, destination, previous, source_mount):
+    def __init__(self, destination, previous, source_mount, sanitizer=None):
         self.destination = destination
+        self.sanitizer = sanitizer
         self.previous = previous
         self.source_mount = source_mount
         self.old_index = (
@@ -86,6 +103,8 @@ class Snapshot:
         self.entries = 0
         self.bytes = 0
         self.copied = 0
+        issues_path = previous / "issues.json" if previous else None
+        self.issues = set(json.loads(issues_path.read_text())) if issues_path and issues_path.exists() else set()
 
     def names(self, fd):
         with os.scandir(fd) as entries:
@@ -160,10 +179,13 @@ class Snapshot:
                     finally:
                         os.close(source)
 
-    def databases(self, fd):
+    def databases(self, fd, relative, pattern):
         for entry in self.names(fd):
-            if not DB.fullmatch(entry.name):
+            if not pattern.fullmatch(entry.name):
                 continue
+            staged_name = entry.name
+            if relative == ANTIGRAVITY and projection.safe_text(os.fsencode(entry.name)) is None:
+                staged_name = "redacted-" + hashlib.sha256(os.fsencode(entry.name)).hexdigest() + ".db"
             base, base_info = self.open_regular(fd, entry.name)
             if base is None:
                 continue
@@ -175,35 +197,73 @@ class Snapshot:
                     source, info = self.open_regular(fd, name)
                     companions.append((name, source, info))
                 group = [info for _, _, info in companions]
-                for name, source, info in companions:
-                    if source is not None:
-                        self.copy(source, f"{OPENCODE}/{name}", info, group)
+                if relative == ANTIGRAVITY:
+                    issue_id = hashlib.sha256(os.fsencode(entry.name)).hexdigest()
+                    if self.sanitizer is None:
+                        raise SnapshotError("Antigravity requires an isolated metadata sanitizer")
+                    key = {"format": "agy-projection-v1", "sanitizer": SANITIZER_REVISION, "source": group}
+                    path = f"{relative}/{staged_name}"
+                    target = self.destination / "home" / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    total = sum(info[2] for _, source, info in companions if source is not None)
+                    self.bytes += total
+                    if any(info[2] > MAX_FILE for _, source, info in companions if source is not None) or self.bytes > MAX_BYTES:
+                        raise SnapshotError("Usage history exceeds the snapshot byte limit")
+                    if self.old_index.get(path) == key:
+                        os.link(self.previous / "home" / path, target)
+                    else:
+                        try:
+                            self.sanitizer(companions, target)
+                        except ConversationError:
+                            target.unlink(missing_ok=True)
+                            self.issues.add(issue_id)
+                            # Keep the last verified observation, if available,
+                            # and retain its old source key so the next sync retries.
+                            if self.previous and path in self.old_index:
+                                os.link(self.previous / "home" / path, target)
+                                self.index[path] = self.old_index[path]
+                            continue
+                        if target.stat().st_size > MAX_FILE:
+                            raise SnapshotError("Projected usage exceeds the snapshot byte limit")
+                        os.utime(target, ns=(base_info[3], base_info[3]))
+                        with target.open("rb") as output:
+                            os.fsync(output.fileno())
+                        self.copied += total
+                    self.index[path] = key
+                    self.issues.discard(issue_id)
+                else:
+                    for name, source, info in companions:
+                        if source is not None:
+                            self.copy(source, f"{relative}/{name}", info, group)
+                for _, source, expected in companions:
+                    if source is not None and file_info(source) != expected:
+                        raise SnapshotError("Usage database changed during collection")
                 # Recheck names for checkpoint, journal creation or replacement.
                 for name, source, expected in companions:
                     current, observed = self.open_regular(fd, name)
                     if current is not None:
                         os.close(current)
                     if observed != expected:
-                        raise SnapshotError("OpenCode changed its database during collection")
+                        raise SnapshotError("Usage database changed during collection")
                     if source is None:
                         try:
                             os.stat(name, dir_fd=fd, follow_symlinks=False)
                         except FileNotFoundError:
                             pass
                         else:
-                            raise SnapshotError("OpenCode sidecar is not a regular usage file")
+                            raise SnapshotError("Database sidecar is not a regular usage file")
             finally:
                 for _, source, _ in companions:
                     if source is not None:
                         os.close(source)
 
 
-def capture(root_fd, destination: Path, previous: Path | None, providers):
+def capture(root_fd, destination: Path, previous: Path | None, providers, sanitizer=None):
     """Create a new generation, reusing immutable files from the last capture."""
     destination.mkdir(mode=0o700)
     try:
         source_mount = mount_id(root_fd)
-        snapshot = Snapshot(destination, previous, source_mount)
+        snapshot = Snapshot(destination, previous, source_mount, sanitizer)
         home = open_dir(root_fd, "home/agent", source_mount)
         if home is None:
             raise SnapshotError("Workspace home is absent or on an unexpected mount")
@@ -221,7 +281,14 @@ def capture(root_fd, destination: Path, previous: Path | None, providers):
                 fd = open_dir(home, OPENCODE, source_mount)
                 if fd is not None:
                     try:
-                        snapshot.databases(fd)
+                        snapshot.databases(fd, OPENCODE, DB)
+                    finally:
+                        os.close(fd)
+            if "antigravity" in providers:
+                fd = open_dir(home, ANTIGRAVITY, source_mount)
+                if fd is not None:
+                    try:
+                        snapshot.databases(fd, ANTIGRAVITY, re.compile(r"[^/]+\.db"))
                     finally:
                         os.close(fd)
         finally:
@@ -230,6 +297,10 @@ def capture(root_fd, destination: Path, previous: Path | None, providers):
             json.dump(snapshot.index, index)
             index.flush()
             os.fsync(index.fileno())
+        with (destination / "issues.json").open("x") as issues:
+            json.dump(sorted(snapshot.issues), issues)
+            issues.flush()
+            os.fsync(issues.fileno())
         for directory, _, _ in os.walk(destination, topdown=False):
             fd = os.open(directory, DIR_FLAGS)
             try:

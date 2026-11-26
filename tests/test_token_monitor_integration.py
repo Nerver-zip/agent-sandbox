@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/token-monitor"))
 import manager  # noqa: E402
+import antigravity_projection  # noqa: E402
 from relay import Hub, HubError  # noqa: E402
 from snapshot import DIR_FLAGS  # noqa: E402
 
@@ -153,6 +154,439 @@ class OfficialCollectorTest(unittest.TestCase):
     def projects(self):
         period = self.device_record()["periods"]["allTime"]
         return period["projects"]
+
+    def test_projected_generation_matches_pinned_scanner(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        source_dir = self.path / "projection-source/.gemini/antigravity-cli/conversations"
+        target_dir = self.path / "projection-output/.gemini/antigravity-cli/conversations"
+        source_dir.mkdir(parents=True)
+        target_dir.mkdir(parents=True)
+        source = source_dir / "session.db"
+        target = target_dir / "session.db"
+        fake_secret = b'{"access_token":"fixture-private-value"}'
+        usage = number(2, 500) + number(5, 16000) + number(9, 40) + number(10, 300) + blob(11, b"response")
+        row = blob(1, blob(2, blob(3, fake_secret)) + blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Fixture")) + blob(2, number(1, stamp))
+        with closing(sqlite3.connect(source)) as db, db:
+            db.executescript("CREATE TABLE gen_metadata(idx INTEGER,data BLOB); CREATE TABLE trajectory_metadata_blob(data BLOB); CREATE TABLE tokens(secret BLOB);")
+            db.execute("INSERT INTO gen_metadata VALUES (0,?)", (row,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+            db.execute("INSERT INTO tokens VALUES (?)", (fake_secret,))
+        self.assertTrue(antigravity_projection.project_database(source, target))
+        self.assertNotIn(fake_secret, target.read_bytes())
+
+        def scan(home):
+            output = subprocess.check_output([
+                "docker", "run", "--rm", "--network=none",
+                "--mount", f"type=bind,src={self.path},dst=/fixture,readonly",
+                "--env", "TOKSCALE_CONFIG_DIR=/opt/tokscale-pricing",
+                "--env", "TOKSCALE_PRICING_CACHE_ONLY=1",
+                "--entrypoint", "/opt/token-monitor/node_modules/.bin/tokscale", IMAGE,
+                "--offline", "--home", f"/fixture/{home}", "--client", "antigravity-cli",
+                "--group-by", "client,workspace,session,model", "--json", "--no-spinner",
+            ], timeout=60, stderr=subprocess.DEVNULL)
+            result = json.loads(output)
+            result.pop("processingTimeMs", None)
+            return result
+        original = scan("projection-source")
+        projected = scan("projection-output")
+        self.assertEqual(original, projected)
+        self.assertEqual(original["totalInput"], 500)
+        self.assertEqual(original["totalCacheRead"], 16000)
+        self.assertEqual(original["totalOutput"], 300)
+        self.assertEqual(original["entries"][0]["reasoning"], 40)
+        self.assertGreater(original["totalCost"], 0)
+
+    def test_malformed_antigravity_is_isolated_and_removes_worker(self):
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        secret = b"fixture-sensitive-input"
+        with closing(sqlite3.connect(directory / "bad.db")) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER,data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0,?)", (b"\x0a\xff" + secret,))
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.assertEqual(len(self.monitor.pending()), 1)
+        self.assertEqual(len(json.loads((self.monitor.pending()[0] / "issues.json").read_text())), 1)
+        self.assertIsNone(self.monitor._sanitizer_name)
+        status = subprocess.run(["docker", "container", "inspect", self.monitor.container_name + "-sanitize"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        self.assertNotEqual(status.returncode, 0)
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(secret, path.read_bytes())
+
+    def test_antigravity_upgrade_retention_and_restore(self):
+        self.check_antigravity_retention(remove_one=False)
+
+    def test_antigravity_duplicate_survives_partial_source_deletion(self):
+        self.check_antigravity_retention(remove_one=True)
+
+    def test_antigravity_monotonic_generation_update_and_restore(self):
+        self.check_antigravity_retention(remove_one=False, rewrite=True)
+
+    def test_antigravity_disjoint_restored_generations_import_without_losing_history(self):
+        self.check_antigravity_retention(remove_one=False, branch=True)
+
+    def check_antigravity_retention(self, remove_one, rewrite=False, branch=False):
+        # Upstream's documented protobuf wire fields, generated without real user data.
+        def varint(value):
+            result = bytearray()
+            while value > 127:
+                result.append((value & 127) | 128)
+                value >>= 7
+            result.append(value)
+            return bytes(result)
+
+        def number(field, value):
+            return varint(field << 3) + varint(value)
+
+        def blob(field, value):
+            return varint((field << 3) | 2) + varint(len(value)) + value
+
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        original = self.totals()
+        original_projects = self.projects()
+        device = self.device
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        writers = []
+        for index in range(2):
+            db = directory / f"session-{index}.db"
+            writer = sqlite3.connect(db)
+            writers.append(writer)
+            self.addCleanup(writer.close)
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.executescript("CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER); CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB);")
+            usage = (number(1, 1132) + number(2, 500) + number(5, 16000) +
+                     number(9, 40) + number(10, 300) + blob(11, f"response-{index}".encode()))
+            fake_secret = b'{"access_token":"fixture-not-a-real-token"}'
+            row = blob(1, blob(2, blob(3, fake_secret)) + blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+            meta = blob(1, blob(1, b"file:///home/agent/workspace/Antigravity-Project")) + blob(2, number(1, stamp))
+            writer.execute("INSERT INTO gen_metadata VALUES (0, ?, 0)", (row,))
+            writer.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", (meta,))
+            if index == 1:
+                duplicate = usage.replace(b"response-1", b"response-0")
+                writer.execute("INSERT INTO gen_metadata VALUES (1, ?, 0)",
+                               (blob(1, blob(4, duplicate) + blob(19, b"gemini-3-flash-a")),))
+            writer.commit()
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.assertIsNone(self.monitor._sanitizer_name)
+        removed = subprocess.run(["docker", "container", "inspect", self.monitor.container_name + "-sanitize"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        self.assertNotEqual(removed.returncode, 0)
+        for path in self.monitor.pending()[0].rglob("*"):
+            if path.is_file():
+                self.assertNotIn(fake_secret, path.read_bytes())
+        self.monitor.deliver(self.monitor.pending()[0])
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(fake_secret, path.read_bytes())
+        counts, costs = self.totals()
+        self.assertEqual(counts, {**original[0], "antigravity": 33680})
+        # Calculate independently from the actual image's pinned pricing
+        # catalog; the source records have non-cached input, cache read,
+        # response output and reasoning output as separate components.
+        catalog = json.loads(subprocess.check_output([
+            "docker", "run", "--rm", "--network=none", "--entrypoint", "cat", IMAGE,
+            "/opt/tokscale-pricing/cache/pricing-models-dev.json",
+        ], timeout=20))["data"]["google/gemini-3.5-flash"]
+        expected_cost = (1000 * catalog["input_cost_per_token"] +
+                         32000 * catalog["cache_read_input_token_cost"] +
+                         680 * catalog["output_cost_per_token"])
+        self.assertAlmostEqual(costs["antigravity"], expected_cost, places=8)
+        period = self.device_record()["periods"]["allTime"]
+        self.assertEqual(period["clientModels"]["antigravity"], {"gemini-3.5-flash-high": 33680})
+        self.assertEqual(period["clientCacheReads"]["antigravity"], 32000)
+        self.assertEqual(self.device, device)
+        self.assertEqual({k: self.projects()[k] for k in original_projects}, original_projects)
+        self.assertEqual(self.projects()["antigravity-project"]["clients"], {"antigravity": 33680})
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals(), (counts, costs))
+        if rewrite:
+            updated_usage = (number(1, 1132) + number(2, 700) + number(5, 16000) +
+                             number(9, 40) + number(10, 300) + blob(11, b"response-1"))
+            updated_row = blob(1, blob(2, blob(3, fake_secret)) + blob(4, updated_usage) +
+                               blob(19, b"gemini-3-flash-a"))
+            writers[1].execute("UPDATE gen_metadata SET data=? WHERE idx=0", (updated_row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            advanced_counts, advanced_costs = self.totals()
+            self.assertEqual(advanced_counts, {**counts, "antigravity": 33880})
+            self.assertGreater(advanced_costs["antigravity"], costs["antigravity"])
+            writers[1].execute("UPDATE gen_metadata SET data=? WHERE idx=0", (row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (advanced_counts, advanced_costs))
+            counts, costs = advanced_counts, advanced_costs
+        if branch:
+            fresh_usage = number(2, 50) + number(10, 5) + blob(11, b"response-fresh")
+            fresh_row = blob(1, blob(4, fresh_usage) + blob(19, b"gemini-3-flash-a"))
+            # A restored older conversation lacks a previously captured row but
+            # contains a distinct new generation at an unused index.
+            writers[1].execute("DELETE FROM gen_metadata WHERE idx=0")
+            writers[1].execute("INSERT INTO gen_metadata VALUES (2, ?, 0)", (fresh_row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            merged_counts, merged_costs = self.totals()
+            self.assertEqual(merged_counts, {**counts, "antigravity": 33735})
+            self.assertGreater(merged_costs["antigravity"], costs["antigravity"])
+            self.assertEqual(self.projects()["antigravity-project"]["clients"], {"antigravity": 33735})
+            writers[1].execute("DELETE FROM gen_metadata WHERE idx=2")
+            writers[1].execute("INSERT INTO gen_metadata VALUES (0, ?, 0)", (row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (merged_counts, merged_costs))
+            counts, costs = merged_counts, merged_costs
+        if remove_one:
+            writers[0].close()
+            first_db = directory / "session-0.db"
+            moved = directory.parent / "removed.db"
+            first_db.rename(moved)
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            moved.rename(first_db)
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            compact = self.monitor.collector_state / "antigravity-usage"
+            backup = compact.rename(compact.with_name("usage-backup"))
+            self.publish()
+            with self.assertRaisesRegex(manager.JobError, "usage archive is missing"):
+                self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            backup.rename(compact)
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            retained_file = compact / "session-0.db"
+            removed_file = retained_file.rename(self.monitor.collector_state / "removed-usage.db")
+            self.publish()
+            with self.assertRaisesRegex(manager.JobError, "usage archive is missing"):
+                self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            removed_file.rename(retained_file)
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            original_bytes = retained_file.read_bytes()
+            original_mtime = retained_file.stat().st_mtime_ns
+            retained_file.write_bytes(original_bytes[:-1] + bytes([original_bytes[-1] ^ 1]))
+            self.publish()
+            with self.assertRaisesRegex(manager.JobError, "usage archive is missing"):
+                self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            retained_file.write_bytes(original_bytes)
+            os.utime(retained_file, ns=(original_mtime, original_mtime))
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+        saved = directory.rename(directory.with_name("saved"))
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals(), (counts, costs))
+        saved.rename(directory)
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals(), (counts, costs))
+
+    def test_antigravity_suspicious_attribution_retains_tokens_without_pricing(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+        def blob(field, value):
+            return antigravity_projection.enc((field << 3) | 2) + antigravity_projection.enc(len(value)) + value
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        secret = b"ya29.fixture-token-value"
+        row = blob(1, blob(4, number(2, 100) + number(10, 10) + blob(11, b"fixture-response")) + blob(19, secret))
+        label_row = blob(1, blob(4, number(2, 20) + blob(11, b"fixture-label")) + blob(21, b"client_secret=fixture"))
+        valid_row = blob(1, blob(4, number(2, 40) + blob(11, b"fixture-valid")) + blob(19, b"gemini-3-flash-a"))
+        meta = blob(1, blob(1, b"file:///home/access_token/project"))
+        with closing(sqlite3.connect(directory / "fixture.db")) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            db.execute("CREATE TABLE trajectory_metadata_blob(data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (row,))
+            db.execute("INSERT INTO gen_metadata VALUES (1, ?)", (label_row,))
+            db.execute("INSERT INTO gen_metadata VALUES (2, ?)", (valid_row,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.assertEqual(self.monitor.deliver(self.monitor.pending()[0]), [])
+        period = self.device_record()["periods"]["allTime"]
+        self.assertEqual(period["clients"]["antigravity"], 170)
+        self.assertEqual(period["clientModels"]["antigravity"], {"unknown": 130, "gemini-3.5-flash-high": 40})
+        self.assertEqual(period["clientModelCosts"].get("antigravity", {}).get("unknown", 0), 0)
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(secret, path.read_bytes())
+                self.assertNotIn(b"access_token", path.read_bytes())
+
+    def test_antigravity_partial_failure_isolates_valid_usage(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+        def blob(field, value):
+            return antigravity_projection.enc((field << 3) | 2) + antigravity_projection.enc(len(value)) + value
+        def row(identity, tokens):
+            return blob(1, blob(4, number(2, tokens) + blob(11, identity)) + blob(19, b"gemini-3-flash-a"))
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        session = directory / "conflict.db"
+        with closing(sqlite3.connect(session)) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (row(b"first", 100),))
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.assertEqual(self.monitor.deliver(self.monitor.pending()[0]), [])
+        before, _ = self.totals()
+        with closing(sqlite3.connect(session)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (row(b"unrelated", 200),))
+        with closing(sqlite3.connect(directory / "independent.db")) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (row(b"second", 50),))
+        (directory / "malformed.db").write_bytes(b"not sqlite")
+        claude = json.loads(self.sources[0].read_text())
+        claude["requestId"] = "second-request"
+        claude["message"]["id"] = "second-message"
+        with self.sources[0].open("a") as stream:
+            stream.write(json.dumps(claude) + "\n")
+        self.publish()
+        issues = self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(len(issues), 2)
+        after, _ = self.totals()
+        self.assertEqual(after["antigravity"], before["antigravity"] + 50)
+        self.assertGreater(after["claude"], before["claude"])
+        self.assertEqual(after["codex"], before["codex"])
+        self.assertEqual(after["opencode"], before["opencode"])
+        self.assertEqual(len(list((self.monitor.collector_state / "antigravity-quarantine").glob("*.db"))), 1)
+        self.publish()
+        self.assertEqual(len(self.monitor.deliver(self.monitor.pending()[0])), 2)
+        self.assertEqual(self.totals()[0], after)
+
+    def test_antigravity_explicit_orchestrator_and_worker_models(self):
+        def varint(value):
+            data = bytearray()
+            while value > 127:
+                data.append((value & 127) | 128)
+                value >>= 7
+            data.append(value)
+            return bytes(data)
+
+        def number(field, value):
+            return varint(field << 3) + varint(value)
+
+        def blob(field, value):
+            return varint((field << 3) | 2) + varint(len(value)) + value
+
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        for index, model in enumerate(("gemini-pro-orchestrator-neon", "gemini-flash-worker-agy")):
+            with closing(sqlite3.connect(directory / f"route-{index}.db")) as db, db:
+                db.execute("CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER)")
+                usage = number(2, 100) + number(9, 5) + number(10, 10) + blob(11, f"route-{index}".encode())
+                generation = blob(1, blob(4, usage) + blob(19, model.encode()))
+                db.execute("INSERT INTO gen_metadata VALUES (0, ?, 0)", (generation,))
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        period = self.device_record()["periods"]["allTime"]
+        self.assertEqual(period["clientModels"]["antigravity"], {
+            "gemini-pro-orchestrator-neon": 115,
+            "gemini-flash-worker-agy": 115,
+        })
+        self.assertEqual(period["clients"]["antigravity"], 230)
+        catalog = json.loads(subprocess.check_output([
+            "docker", "run", "--rm", "--network=none", "--entrypoint", "cat", IMAGE,
+            "/opt/tokscale-pricing/cache/pricing-models-dev.json",
+        ], timeout=20))["data"]
+        for route, model in (("gemini-pro-orchestrator-neon", "google/gemini-4-neon"),
+                             ("gemini-flash-worker-agy", "google/gemini-4-hydrogen")):
+            rates = catalog[model]
+            cost = 100 * rates["input_cost_per_token"] + 15 * rates["output_cost_per_token"]
+            self.assertAlmostEqual(period["clientModelCosts"]["antigravity"][route], cost, places=8)
+
+    def test_antigravity_synthetic_parent_child_shared_response_and_workers(self):
+        self.check_synthetic_parent_child(shared_identity=True)
+
+    def test_antigravity_synthetic_parent_child_without_identity_is_not_deduplicated(self):
+        self.check_synthetic_parent_child(shared_identity=False)
+
+    def check_synthetic_parent_child(self, shared_identity):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        def generation(response, model, inputs, output):
+            usage = number(2, inputs) + number(10, output) + blob(11, response)
+            return blob(1, blob(4, usage) + blob(19, model))
+
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Fixture-Project")) + blob(2, number(1, stamp))
+        planner = b"gemini-pro-orchestrator-neon"
+        worker = b"gemini-flash-worker-agy"
+        shared = b"shared" if shared_identity else b""
+        sessions = {
+            "parent.db": [(0, generation(b"planner", planner, 100, 10)),
+                          (1, generation(shared, worker, 50, 5))],
+            "child.db": [(0, generation(shared, worker, 50, 5)),
+                         (1, generation(b"child-only", worker, 30, 3))],
+        }
+        for name, rows in sessions.items():
+            with closing(sqlite3.connect(directory / name)) as db, db:
+                db.executescript("""
+                    CREATE TABLE gen_metadata(idx INTEGER,data BLOB);
+                    CREATE TABLE trajectory_metadata_blob(data BLOB);
+                    CREATE TABLE parent_references(idx INTEGER,data BLOB);
+                    CREATE TABLE steps(idx INTEGER,step_type INTEGER,metadata BLOB,has_subtrajectory INTEGER);
+                """)
+                db.executemany("INSERT INTO gen_metadata VALUES (?,?)", rows)
+                db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+                # Synthetic placeholders only: no real parent-reference encoding is assumed.
+                if name == "child.db":
+                    db.execute("INSERT INTO parent_references VALUES (0,?)", (b"fixture-placeholder",))
+                else:
+                    db.execute("INSERT INTO steps VALUES (0,15,?,1)", (blob(1, number(1, stamp)),))
+        self.monitor.config["providers"] = ["antigravity"]
+        self.publish()
+        generation_dir, = self.monitor.pending()
+        for path in (generation_dir / "home/.gemini/antigravity-cli/conversations").glob("*.db"):
+            with closing(sqlite3.connect(path)) as db:
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+                self.assertNotIn("parent_references", tables)
+                columns = {row[1] for row in db.execute("PRAGMA table_info(steps)")}
+                self.assertNotIn("has_subtrajectory", columns)
+        self.monitor.deliver(generation_dir)
+        period = self.device_record()["periods"]["allTime"]
+        expected = 198 if shared_identity else 253
+        self.assertEqual(period["clients"]["antigravity"], expected)
+        self.assertEqual(period["clientModels"]["antigravity"], {
+            "gemini-pro-orchestrator-neon": 110,
+            "gemini-flash-worker-agy": 88 if shared_identity else 143,
+        })
+        self.assertEqual(self.projects()["fixture-project"]["clients"], {"antigravity": expected})
+        self.assertGreater(period["clientCosts"]["antigravity"], 0)
+        self.assertAlmostEqual(sum(period["clientModelCosts"]["antigravity"].values()),
+                               period["clientCosts"]["antigravity"], places=8)
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.device_record()["periods"]["allTime"]["clients"]["antigravity"], expected)
 
     def test_project_attribution_and_reconciliation_by_provider(self):
         self.publish()
@@ -396,6 +830,209 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals()[0], {"claude": 110, "codex": 220, "opencode": 132})
+
+    def test_setup_upgrade_preserves_running_workspace_and_three_provider_history(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        project = self.path / "upgrade-project"
+        project.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", project / "scripts/token-monitor")
+        units = self.path / "systemd"
+        units.mkdir()
+        secret_file = project / ".token-monitor.secret"
+        secret_file.write_text(self.secret + "\n")
+        secret_file.chmod(0o600)
+        config_file = project / ".token-monitor.json"
+        config = {"enabled": True, "hub_url": f"http://127.0.0.1:{self.port}",
+                  "secret_file": ".token-monitor.secret", "providers": ["claude", "codex", "opencode"],
+                  "projects_enabled": True, "timezone": "UTC"}
+        config_file.write_text(json.dumps(config))
+        config_file.chmod(0o600)
+        agy_dir = self.home / ".gemini/antigravity-cli/conversations"
+        agy_dir.mkdir(parents=True)
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        usage = number(2, 100) + number(10, 10) + blob(11, b"upgrade-response")
+        row = blob(1, blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Agy-Project")) + blob(2, number(1, stamp))
+        with closing(sqlite3.connect(agy_dir / "upgrade.db")) as db, db:
+            db.executescript("CREATE TABLE gen_metadata(idx INTEGER,data BLOB); CREATE TABLE trajectory_metadata_blob(data BLOB);")
+            db.execute("INSERT INTO gen_metadata VALUES (0,?)", (row,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+        fixture = self.path / "upgrade-fixture"
+        shutil.copytree(self.home, fixture / "home/agent")
+        (fixture / "Dockerfile").write_text(
+            f"FROM {IMAGE}\nCOPY --chown={os.getuid()}:{os.getgid()} home/agent/ /home/agent/\n")
+        image = f"{self.monitor.container_name}-upgrade-workspace"
+        self.addCleanup(subprocess.run, ["docker", "image", "rm", image],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "build", "--quiet", "-t", image, str(fixture)],
+                       check=True, stdout=subprocess.DEVNULL, timeout=60)
+        cid = subprocess.check_output([
+            "docker", "run", "-d", "--network=none", "--cap-drop=ALL", "--init",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--label", "com.docker.compose.project=agent-sandbox",
+            "--label", "com.docker.compose.service=workspace",
+            "--label", f"com.docker.compose.project.working_dir={project}",
+            "--entrypoint", "sh", image, "-c",
+            "printf active > /home/agent/agent-marker; exec sleep infinity",
+        ], text=True, timeout=15).strip()
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", cid],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "exec", cid, "sh", "-c", "while test ! -f /home/agent/agent-marker; do sleep 0.1; done"],
+                       check=True, timeout=10)
+        def state_of_workspace():
+            return subprocess.check_output(["docker", "inspect", "--format",
+                                            "{{.State.Pid}}|{{.State.StartedAt}}|{{.State.Running}}", cid],
+                                           text=True, timeout=10).strip()
+        before_workspace = state_of_workspace()
+        original_init = manager.Monitor.__init__
+        def test_init(monitor, settings):
+            original_init(monitor, settings)
+            monitor.image = IMAGE
+            monitor.container_name = self.monitor.container_name
+        saved_umask = os.umask(0o077)
+        self.addCleanup(os.umask, saved_umask)
+        with patch.multiple(manager, PROJECT=project, CONFIG=config_file, SYSTEMD=units), \
+             patch.object(manager.os, "geteuid", return_value=0), \
+             patch.object(manager, "private_state"), patch.object(manager, "systemctl") as systemctl, \
+             patch.object(manager.Monitor, "__init__", test_init), patch.object(sys, "argv", ["manager", "setup"]):
+            self.assertEqual(manager.main(), 0)
+            before_totals = self.totals()
+            before_projects = self.projects()
+            self.assertEqual(before_totals[0], {"claude": 110, "codex": 220, "opencode": 132})
+            before_device = (self.state / "device.json").read_bytes()
+            before_secret = secret_file.read_bytes()
+            before_units = {path.name: (path.read_bytes(), path.stat().st_ino) for path in units.iterdir()}
+            self.assertEqual(len(before_units), 2)
+            # Previously captured history must survive when its source is gone.
+            subprocess.run(["docker", "exec", cid, "rm", "-rf", "/home/agent/.claude/projects"], check=True, timeout=10)
+            config["providers"].append("antigravity")
+            config_file.write_text(json.dumps(config))
+            self.assertEqual(manager.main(), 0)
+            self.assertEqual(state_of_workspace(), before_workspace)
+            self.assertEqual(subprocess.check_output(["docker", "exec", cid, "cat", "/home/agent/agent-marker"], text=True), "active")
+            self.assertEqual((self.state / "device.json").read_bytes(), before_device)
+            self.assertEqual(secret_file.read_bytes(), before_secret)
+            self.assertEqual({path.name: (path.read_bytes(), path.stat().st_ino) for path in units.iterdir()}, before_units)
+            self.assertEqual(json.loads(config_file.read_text()), config)
+            self.assertEqual(self.totals()[0], {**before_totals[0], "antigravity": 110})
+            self.assertEqual({key: self.projects()[key] for key in before_projects}, before_projects)
+            self.assertEqual(self.projects()["agy-project"]["clients"], {"antigravity": 110})
+            self.assertTrue(systemctl.called)
+
+    def test_antigravity_final_capture_and_empty_recreation(self):
+        self.check_antigravity_final_capture(outage=False)
+
+    def test_antigravity_final_capture_recovers_after_hub_outage(self):
+        self.check_antigravity_final_capture(outage=True)
+
+    def check_antigravity_final_capture(self, outage):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        secret = b'{"access_token":"fixture-private-final-value"}'
+        def generation(identifier, inputs, outputs):
+            usage = number(2, inputs) + number(10, outputs) + blob(11, identifier)
+            return blob(1, blob(2, blob(3, secret)) + blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+
+        project = self.path / "workspace-project"
+        project.mkdir()
+        fixture = self.path / "final-fixture"
+        conversations = fixture / ".gemini/antigravity-cli/conversations"
+        conversations.mkdir(parents=True)
+        db_path = conversations / "final-session.db"
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Final-Project")) + blob(2, number(1, stamp))
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.executescript("CREATE TABLE gen_metadata(idx INTEGER, data BLOB); CREATE TABLE trajectory_metadata_blob(data BLOB);")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (generation(b"initial", 100, 10),))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+        (fixture / "Dockerfile").write_text(
+            f"FROM {IMAGE}\n"
+            f"COPY --chown={os.getuid()}:{os.getgid()} .gemini /home/agent/.gemini\n"
+        )
+        image = f"{self.monitor.container_name}-agy-workspace"
+        self.addCleanup(subprocess.run, ["docker", "image", "rm", image],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "build", "--quiet", "-t", image, str(fixture)],
+                       check=True, stdout=subprocess.DEVNULL, timeout=60)
+        saved_project, manager.PROJECT = manager.PROJECT, project
+        self.addCleanup(setattr, manager, "PROJECT", saved_project)
+        self.monitor.config["providers"] = ["antigravity"]
+        script = """import os, signal, sqlite3, time
+path = '/home/agent/.gemini/antigravity-cli/conversations/final-session.db'
+db = sqlite3.connect(path)
+db.execute('PRAGMA journal_mode=WAL')
+def finish(*_):
+    db.execute('INSERT INTO gen_metadata VALUES (1, ?)', (bytes.fromhex(os.environ['FINAL_ROW']),))
+    db.commit()
+    db.close()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, finish)
+open('/tmp/fixture-ready', 'w').close()
+while True: time.sleep(0.1)
+"""
+        cid = subprocess.check_output([
+            "docker", "run", "-d", "--network=none", "--cap-drop=ALL", "--init",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--label", "com.docker.compose.project=agent-sandbox",
+            "--label", "com.docker.compose.service=workspace",
+            "--label", f"com.docker.compose.project.working_dir={project}",
+            "--env", f"FINAL_ROW={generation(b'final', 50, 5).hex()}",
+            "--entrypoint", "/usr/bin/python3", image, "-c", script,
+        ], text=True, timeout=15).strip()
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", cid],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "exec", cid, "sh", "-c", "while test ! -e /tmp/fixture-ready; do sleep 0.1; done"],
+                       check=True, timeout=10)
+        self.monitor.sync()
+        self.assertEqual(self.totals()[0], {"antigravity": 110})
+        if outage:
+            self.stop_hub()
+        self.monitor.sync(final=True)
+        self.assertEqual(manager.workspace()[1], 0)
+        if outage:
+            self.assertEqual(len(self.monitor.pending()), 1)
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(secret, path.read_bytes())
+        subprocess.run(["docker", "rm", cid], check=True, stdout=subprocess.DEVNULL)
+        if outage:
+            self.start_hub()
+            self.monitor.sync()
+            self.assertEqual(self.monitor.pending(), [])
+        self.assertEqual(self.totals()[0], {"antigravity": 165})
+        self.assertEqual(self.projects()["final-project"]["tokens"], 165)
+        recreated = subprocess.check_output([
+            "docker", "run", "-d", "--network=none", "--cap-drop=ALL",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--label", "com.docker.compose.project=agent-sandbox",
+            "--label", "com.docker.compose.service=workspace",
+            "--label", f"com.docker.compose.project.working_dir={project}",
+            "--entrypoint", "sh", image, "-c",
+            "rm -rf /home/agent/.gemini/antigravity-cli/conversations; exec sleep infinity",
+        ], text=True, timeout=15).strip()
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", recreated],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "exec", recreated, "sh", "-c",
+                        "while test -e /home/agent/.gemini/antigravity-cli/conversations; do sleep 0.1; done"],
+                       check=True, timeout=10)
+        with patch.object(manager, "PROJECT", ROOT):
+            restarted = manager.Monitor(self.monitor.config)
+        restarted.image = IMAGE
+        restarted.container_name = self.monitor.container_name
+        restarted.sync()
+        self.assertEqual(self.totals()[0], {"antigravity": 165})
+        self.assertEqual(self.projects()["final-project"]["tokens"], 165)
 
     def test_controlled_stop_captures_last_write_before_container_removal(self):
         # Build an isolated workspace with fixture data in its writable-overlay

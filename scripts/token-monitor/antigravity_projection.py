@@ -61,7 +61,14 @@ def safe_text(value):
         text = value.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    if re.search(r"(?i)(access[_-]?token|refresh[_-]?token|authorization|bearer\s|private[ _-]?key|github_pat_|ghp_|ya29\.|sk-[a-z0-9]{12,})", unquote(text)):
+    decoded = unquote(text)
+    patterns = (
+        r"(?i)(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|authorization|bearer\s|private[ _-]?key)",
+        r"(?i)(github_pat_|ghp_|ya29\.|sk-[a-z0-9]{12,})",
+        r"(?<![A-Za-z0-9])1//[A-Za-z0-9_-]{20,}",
+        r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+    )
+    if any(re.search(pattern, decoded) for pattern in patterns):
         raise ValueError("credential-shaped scanner string")
     return value
 

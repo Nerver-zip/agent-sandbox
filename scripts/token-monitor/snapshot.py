@@ -1,12 +1,17 @@
 """Copy the supported usage sources without traversing sandbox links or mounts."""
 
 import errno
+import importlib.util
 import json
 import os
 import re
 import shutil
 import stat
 from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("antigravity_projection", Path(__file__).with_name("antigravity_projection.py"))
+projection = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(projection)
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -167,6 +172,12 @@ class Snapshot:
         for entry in self.names(fd):
             if not pattern.fullmatch(entry.name):
                 continue
+            if relative == ANTIGRAVITY:
+                try:
+                    if projection.safe_text(os.fsencode(entry.name)) is None:
+                        raise ValueError("invalid session filename")
+                except ValueError:
+                    raise SnapshotError("Antigravity session filename is not safe to persist") from None
             base, base_info = self.open_regular(fd, entry.name)
             if base is None:
                 continue

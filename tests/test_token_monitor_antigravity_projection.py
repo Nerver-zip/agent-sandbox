@@ -43,7 +43,10 @@ class ProjectionTest(unittest.TestCase):
     def test_credential_shaped_model_and_workspace_fail_closed(self):
         for data, schema in ((blob(19, b"Bearer fixture-private-value"), projection.CHAT),
                              (blob(1, blob(1, b"file:///home/access_token/project")), projection.TRAJECTORY),
-                             (blob(1, blob(1, b"file:///home/access%5ftoken/project")), projection.TRAJECTORY)):
+                             (blob(1, blob(1, b"file:///home/access%5ftoken/project")), projection.TRAJECTORY),
+                             (blob(19, b"1//abcdefghijklmnopqrstuvwxyz012345"), projection.CHAT),
+                             (blob(1, blob(1, b"file:///home/eyJabcdefghijk.eyJabcdefghijk.abcdefghijk")), projection.TRAJECTORY),
+                             (blob(21, b"client_secret=fixture"), projection.CHAT)):
             with self.subTest(schema=schema), self.assertRaisesRegex(ValueError, "credential-shaped"):
                 projection.project(data, schema)
 
@@ -118,7 +121,7 @@ class ProjectionTest(unittest.TestCase):
         self.assertFalse(projection.monotonic_generation_update(b"not protobuf", generation(15, 3)))
 
     def test_invalid_wire_data_fails_closed(self):
-        for value in (b"\\x00", b"\\x0a\\x80", b"\\x0a\\x02x", b"\\x0b", b"\\x09x", b"\\xff" * 11):
+        for value in (b"\x00", b"\x0a\x80", b"\x0a\x02x", b"\x0b", b"\x09x", b"\x08\x01", b"\xff" * 11):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 projection.project(value, projection.GEN)
 

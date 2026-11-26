@@ -141,6 +141,12 @@ class SnapshotTests(unittest.TestCase):
             snapshot.capture(self.fd, destination, None, ["antigravity"])
         self.assertFalse(destination.exists())
 
+    def test_credential_shaped_antigravity_filename_is_not_staged(self):
+        self.write(f"{snapshot.ANTIGRAVITY}/ya29.fixture-token-value.db", b"fixture")
+        with self.assertRaisesRegex(snapshot.SnapshotError, "filename is not safe"):
+            self.capture("unsafe-name", providers=["antigravity"])
+        self.assertFalse((self.tmp / "unsafe-name").exists())
+
     def test_antigravity_allowlist_and_wal_recovery(self):
         directory = self.home / snapshot.ANTIGRAVITY
         directory.mkdir(parents=True)

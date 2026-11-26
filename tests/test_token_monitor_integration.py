@@ -199,6 +199,9 @@ class OfficialCollectorTest(unittest.TestCase):
     def test_older_backup_beyond_native_daily_scan_does_not_add_a_false_day(self):
         self.check_older_backup(age_days=45)
 
+    def test_resuming_a_shorter_backup_does_not_reduce_historical_totals(self):
+        self.check_older_backup(age_days=-1)
+
     def check_older_backup(self, age_days):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])

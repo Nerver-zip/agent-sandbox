@@ -25,8 +25,9 @@ function removeOlderObservations(summary, archive, now) {
     const retainedTime = Date.parse(retained.lastUsedAt);
     const liveTime = Date.parse(live.lastUsedAt);
     const older = Number.isFinite(retainedTime) && Number.isFinite(liveTime) && liveTime < retainedTime;
-    const provenNewer = Number.isFinite(retainedTime) && Number.isFinite(liveTime) && liveTime > retainedTime;
-    if (older || (!provenNewer && live.totalTokens < retained.totalTokens)) stale.set(key, [live, retained]);
+    // A resumed backup can write a newer turn before it has caught up with
+    // the retained usage. Its timestamp alone cannot justify reducing history.
+    if (older || live.totalTokens < retained.totalTokens) stale.set(key, [live, retained]);
   }
   if (stale.size === 0) return stale;
 

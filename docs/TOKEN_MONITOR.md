@@ -59,9 +59,9 @@ The config and default secret are excluded from Git and Docker build contexts. `
 
 ### Device identity, deletion and restore
 
-The upstream Hub replaces a device's snapshot when it receives the same device ID. It combines different device IDs without cross-device deduplication. This integration uses one installation ID across restarts and empty recreations, with a persistent upstream usage archive. When a session disappears, the collector can replay its last retained observation. A native observation of the same session key wins over its archived copy, so restoring the same session source to the same installation does not add a second session.
+The upstream Hub replaces a device's snapshot when it receives the same device ID. It combines different device IDs without cross-device deduplication. This integration uses one installation ID across restarts and empty recreations, with a persistent upstream usage archive. When a session disappears, the collector can replay its last retained observation. Restoring the same session source to the same installation does not add a second session. If a restored observation is provably older, or its freshness is unclear and its count is lower, the collector keeps the archived version and continues importing other sessions. Agent Sandbox selects which version to pass to Token Monitor. The upstream collector still computes, projects and archives the usage figures.
 
-Keep a host backup of `.token-monitor/` together with its configuration and the Hub's own data. Restore the usage sources to the same installation or migrate the device ID and archive together. Restore or transfer a single lineage and keep its original collector off. Concurrently publishing a copied workspace under another ID double counts its sessions. A stale or edited version of the same transcript may report a lower current observation because Token Monitor treats currently readable data as authoritative. Use the latest usage sources for an in-place restore and keep the newest host archive.
+Keep a host backup of `.token-monitor/` together with its configuration and the Hub's own data. Restore the usage sources to the same installation or migrate the device ID and archive together. Restore or transfer a single lineage and keep its original collector off. Concurrently publishing a copied workspace under another ID double counts its sessions. A later observation is authoritative. A resumed fork that reuses the original provider session ID and has newer usage timestamps is indistinguishable from a normal update, so start a distinct provider session when continuing from an old transcript. For older dates outside the collector’s session-level daily window, the collector keeps existing day history for providers with stale observations. Separate sessions from those days still import into all-time totals. A fresh daily breakdown for a mixture of old and new records on such a day may be incomplete.
 
 An unsolicited container removal, a host crash before the snapshot, or provider records deleted before any successful scan can lose unobserved usage. The Hub keeps ingested history when the workspace is removed. Hub storage durability is owned by the Hub deployment. A standalone Hub batches disk writes and flushes on graceful shutdown. Preserve its data volume across restarts.
 
@@ -75,19 +75,21 @@ An unsolicited container removal, a host crash before the snapshot, or provider 
 
 ## Maintenance and performance
 
-To upgrade, back up `.token-monitor/`, drain any pending recovery queue, set the desired `collector_version`, and rerun setup. Setup reuses the image when the version and build inputs match. Test new releases against an isolated Hub before switching production, since this integration relies on upstream archive formats, scanner paths and the authenticated full-ingest protocol.
+To upgrade, back up `.token-monitor/`, drain any pending recovery queue, set the desired `collector_version`, and rerun setup. Setup reuses the image when the version and build inputs match. Test new releases against an isolated Hub before switching production. The integration relies on upstream archive, period projection and daily history APIs, scanner paths, and the authenticated full-ingest protocol.
 
-Claude and Codex records are copied only from the supported project, session and archived-session directories, including Codex's Zstandard archives. A capture preserves file bytes and modification times, and rejects a generation if a record changes during its read. The upstream scanner decides how to interpret a stable JSONL tail, including a final valid record without a newline. OpenCode collects legacy messages and SQLite databases. DB and WAL identities are checked before and after copying. Only the collector processes SQLite, on a private copy of a captured WAL pair. A WAL checkpoint during capture causes a retry. Provider-specific custom paths are outside the supported scope. Pricing is the upstream scanner's estimate using the data available offline.
+Claude and Codex records are copied only from the supported project, session and archived-session directories, including Codex's Zstandard archives. A capture preserves file bytes and modification times, and rejects a generation if a record changes during its read. The upstream scanner decides how to interpret a stable JSONL tail, including a final valid record without a newline. OpenCode collects legacy messages and SQLite databases. DB and WAL identities are checked before and after copying. Only the collector processes SQLite, on a private copy of a captured WAL pair. A WAL checkpoint during capture causes a retry. Provider-specific custom paths are outside the supported scope. The collector image downloads Tokscale's public pricing catalogs at build time. The networkless collector uses those catalogs and upstream pricing logic to estimate costs. A model missing from the bundled catalogs can have unknown pricing until the image is rebuilt with newer catalogs.
 
 A local benchmark used 1,000 Codex-shaped JSONL files covering 303,600,000 bytes on a Linux host. It measured snapshot construction, including metadata traversal and fsync:
 
 | Snapshot | Copied | Elapsed |
 | --- | ---: | ---: |
-| Cold | 303,600,000 bytes | 0.758 s |
-| Unchanged | 0 bytes | 0.120 s |
-| One appended record | 304,612 bytes | 0.122 s |
+| Cold | 303,600,000 bytes | 0.385 s |
+| Unchanged | 0 bytes | 0.078 s |
+| One appended record | 304,612 bytes | 0.083 s |
 
 All passes inspect file metadata to detect replacement and deletion. The unchanged pass hard-links previously copied files inside private host state. Changed files are recopied in full, and a changed SQLite database may require copying its WAL pair and materializing it in the collector. The official agent does its own scan on each synchronization. The timings exclude that scan, Hub upload and Docker startup.
+
+The integration tests start a disposable Hub and Docker containers. To run them, install the upstream checkout's production npm dependencies, build the collector image for the same version, and set `TOKEN_MONITOR_TEST_UPSTREAM` and `TOKEN_MONITOR_TEST_IMAGE` to their respective checkout path and image tag. Run `python3 -m unittest discover -s tests -p 'test_token_monitor*.py' -v` from Agent Sandbox.
 
 ## Trust boundary
 

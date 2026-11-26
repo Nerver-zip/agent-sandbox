@@ -261,7 +261,9 @@ class Monitor:
         self.collector_state = STATE / "collector"
         self.device = self.load_device()
         context = PROJECT / "scripts/token-monitor"
-        source_hash = hashlib.sha256((context / "Dockerfile").read_bytes() + (context / "collect.py").read_bytes())
+        source_hash = hashlib.sha256()
+        for name in ("Dockerfile", "collect.py", "restore.cjs"):
+            source_hash.update((context / name).read_bytes())
         self.image = f"agent-sandbox-token-monitor:{config['version']}-{source_hash.hexdigest()[:12]}"
         instance = hashlib.sha256(os.fsencode(PROJECT)).hexdigest()[:16]
         self.container_name = f"agent-sandbox-token-monitor-{instance}"

@@ -1,5 +1,6 @@
 """Opt-in integration with the official Node Hub and built collector image."""
 
+from contextlib import closing
 import datetime
 import json
 import os
@@ -101,14 +102,14 @@ class OfficialCollectorTest(unittest.TestCase):
         codex.write_text("".join(json.dumps({"timestamp": when, **record}) + "\n" for record in [
             {"type": "session_meta", "payload": {"id": "codex-session", "cwd": "/workspace",
                                                  "originator": "codex_cli_rs", "source": "cli"}},
-            {"type": "turn_context", "payload": {"turn_id": "turn", "model": "gpt-5.5"}},
+            {"type": "turn_context", "payload": {"turn_id": "turn", "model": "gpt-5.4"}},
             {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage,
                                                                            "last_token_usage": usage}}},
         ]))
         opencode = self.home / ".local/share/opencode"
         legacy = opencode / "storage/message/ses_legacy/msg_legacy.json"
         legacy.parent.mkdir(parents=True)
-        message = {"id": "msg_legacy", "sessionID": "ses_legacy", "role": "assistant", "modelID": "gpt-5.5",
+        message = {"id": "msg_legacy", "sessionID": "ses_legacy", "role": "assistant", "modelID": "gpt-4o",
                    "providerID": "openai", "time": {"created": ms, "completed": ms + 1},
                    "tokens": {"input": 40, "output": 4, "reasoning": 0, "cache": {"read": 0, "write": 0}}}
         legacy.write_text(json.dumps(message))
@@ -146,12 +147,15 @@ class OfficialCollectorTest(unittest.TestCase):
         return period["clients"], period["clientCosts"]
 
     def test_historical_import_outage_recreation_restore_and_hub_restart(self):
+        self.monitor.provision()
+        self.monitor.provision()
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         initial = self.totals()
         counts, costs = initial
         self.assertEqual(counts, {"claude": 110, "codex": 220, "opencode": 132})
-        self.assertGreater(sum(costs.values()), 0)
+        self.assertEqual(set(costs), set(counts))
+        self.assertTrue(all(cost > 0 for cost in costs.values()))
 
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
@@ -160,13 +164,22 @@ class OfficialCollectorTest(unittest.TestCase):
         self.stop_hub()
         self.publish()
         pending, = self.monitor.pending()
-        with self.assertRaises(manager.JobError):
-            self.monitor.deliver(pending)
+        with patch.object(manager, "workspace", return_value=None):
+            with self.assertRaises(manager.JobError):
+                self.monitor.sync(scheduled=True)
         self.assertTrue(pending.is_dir())
+        status = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(status["pending"], 1)
+        self.assertGreater(status["retry_after"], time.time())
 
         self.start_hub()
         self.assertEqual(self.totals(), initial)
-        self.monitor.deliver(pending)
+        with patch.object(manager, "workspace", return_value=None):
+            self.monitor.sync(scheduled=True)
+            self.assertTrue(pending.is_dir())
+            with patch.object(manager.time, "time", return_value=status["retry_after"] + 1):
+                self.monitor.sync(scheduled=True)
+        self.assertFalse(pending.is_dir())
         self.assertEqual(self.totals(), initial)
 
         restored = self.home.rename(self.path / "restored")
@@ -179,6 +192,63 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals(), initial)
+
+    def test_older_backup_keeps_newer_session_versions_and_imports_new_usage(self):
+        self.check_older_backup(age_days=5)
+
+    def test_older_backup_beyond_native_daily_scan_does_not_add_a_false_day(self):
+        self.check_older_backup(age_days=45)
+
+    def check_older_backup(self, age_days):
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        original_counts, original_costs = self.totals()
+
+        claude, codex, _, db = self.sources
+        record = json.loads(claude.read_text())
+        newest = datetime.datetime.fromisoformat(record["timestamp"])
+        older = newest - datetime.timedelta(days=age_days)
+        record["timestamp"] = older.isoformat()
+        record["message"]["usage"]["input_tokens"] = 20
+        claude.write_text(json.dumps(record) + "\n")
+
+        # An unrelated session in the same restored source remains visible.
+        record.update(sessionId="new-session", requestId="new-request", timestamp=newest.isoformat())
+        record["message"]["id"] = "new-message"
+        (claude.parent / "new-session.jsonl").write_text(json.dumps(record) + "\n")
+
+        rows = [json.loads(line) for line in codex.read_text().splitlines()]
+        for row in rows:
+            row["timestamp"] = older.isoformat()
+        payload = rows[-1]["payload"]["info"]
+        for usage in payload.values():
+            usage.update(input_tokens=50, cached_input_tokens=0, total_tokens=70)
+        codex.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        with closing(sqlite3.connect(db)) as writer, writer:
+            second = json.loads(writer.execute("SELECT data FROM session_message").fetchone()[0])
+            second["time"] = {"created": int(older.timestamp() * 1000)}
+            second["tokens"]["input"] = 12
+            writer.execute("UPDATE session_message SET data = ?", (json.dumps(second),))
+
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        expected = {**original_counts, "claude": 140}
+        counts, costs = self.totals()
+        self.assertEqual(counts, expected)
+        self.assertGreater(costs["claude"], original_costs["claude"])
+        self.assertEqual(costs.get("opencode", 0), original_costs.get("opencode", 0))
+        self.assertEqual(costs.get("codex", 0), original_costs.get("codex", 0))
+        status, body = self.hub.request("GET", "/api/history")
+        self.assertEqual(status, 200)
+        daily, = json.loads(body)["daily"]
+        self.assertEqual(daily["date"], newest.date().isoformat())
+        self.assertEqual(daily["tokens"], sum(expected.values()))
+        self.assertAlmostEqual(daily["cost"], sum(costs.values()), places=6)
+
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals(), (counts, costs))
 
     def test_adopting_an_existing_device_preserves_deleted_sessions(self):
         self.publish()

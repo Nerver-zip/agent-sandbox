@@ -12,5 +12,7 @@ RUN git init -q \
 RUN npm ci --omit=dev --ignore-scripts \
     && npm run ensure:tokscale \
     && rm -rf .git /root/.npm
-COPY collect.py /opt/collect.py
+RUN TOKSCALE_CONFIG_DIR=/opt/tokscale-pricing node_modules/.bin/tokscale pricing refresh --json --no-spinner \
+    && test -s /opt/tokscale-pricing/cache/pricing-litellm.json
+COPY collect.py restore.cjs /opt/
 ENTRYPOINT ["/usr/bin/python3", "-I", "/opt/collect.py"]

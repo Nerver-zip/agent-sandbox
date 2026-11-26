@@ -9,10 +9,18 @@ from pathlib import Path
 SNAPSHOT = Path("/snapshot")
 HOME = Path("/work/home")
 DATA = Path("/state")
+PRICING = Path("/opt/tokscale-pricing/cache")
 
 
 def prepare():
     HOME.mkdir(parents=True)
+    cache = DATA / "config/tokscale/cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    for catalog in PRICING.glob("pricing-*.json"):
+        target = cache / catalog.name
+        if not target.is_symlink() or target.readlink() != catalog:
+            target.unlink(missing_ok=True)
+            target.symlink_to(catalog)
     for name in (".claude", ".codex"):
         source = SNAPSHOT / name
         if source.exists():
@@ -69,10 +77,11 @@ def main():
             "TOKEN_MONITOR_SYNC_SESSION_TITLES": "0",
             "TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED": "1",
             "TOKEN_MONITOR_PROJECTS_ENABLED": "0",
+            "TOKSCALE_PRICING_CACHE_ONLY": "1",
             "TZ": os.environ["TZ"],
         }
         return subprocess.run(
-            ["/usr/local/bin/node", "src/agent/agent.js", "--once"], env=env, check=False
+            ["/usr/local/bin/node", "--require", "/opt/restore.cjs", "src/agent/agent.js", "--once"], env=env, check=False
         ).returncode
     finally:
         relay.terminate()

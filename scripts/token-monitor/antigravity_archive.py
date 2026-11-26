@@ -1,6 +1,7 @@
 """Retain the SQLite columns needed by the pinned Antigravity scanner."""
 
 from contextlib import closing
+import importlib.util
 import filecmp
 import json
 import os
@@ -15,6 +16,10 @@ TABLES = {
 }
 MAX_BYTES = 8 * 1024**3
 MAX_DATABASES = 500_000
+
+spec = importlib.util.spec_from_file_location("antigravity_projection", Path(__file__).with_name("antigravity_projection.py"))
+projection = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(projection)
 
 
 class ArchiveError(RuntimeError):
@@ -53,6 +58,50 @@ def generations_subset(older, newer):
             WHERE old.n > COALESCE(current.n, 0) LIMIT 1
         """
         return db.execute(query).fetchone() is None
+
+
+def metadata_preserved(older, newer):
+    """Do not replace retained workspace or step clocks with an incomplete copy."""
+    with closing(sqlite3.connect(f"{older.as_uri()}?mode=ro", uri=True)) as db:
+        db.execute("ATTACH DATABASE ? AS newer", (str(newer),))
+        old_tables = {row[0] for row in db.execute("SELECT name FROM main.sqlite_schema WHERE type='table'")}
+        new_tables = {row[0] for row in db.execute("SELECT name FROM newer.sqlite_schema WHERE type='table'")}
+        for table, columns in (("trajectory_metadata_blob", ("data",)),
+                               ("steps", ("idx", "step_type", "metadata"))):
+            if table not in old_tables:
+                continue
+            if table not in new_tables:
+                if db.execute(f"SELECT 1 FROM main.{table} LIMIT 1").fetchone():
+                    return False
+                continue
+            fields = ", ".join(columns)
+            equality = " AND ".join(f"current.{field} IS old.{field}" for field in columns)
+            query = f"""
+                WITH old AS (SELECT {fields}, COUNT(*) AS n FROM main.{table} GROUP BY {fields}),
+                     current AS (SELECT {fields}, COUNT(*) AS n FROM newer.{table} GROUP BY {fields})
+                SELECT 1 FROM old LEFT JOIN current ON {equality}
+                WHERE old.n > COALESCE(current.n, 0) LIMIT 1
+            """
+            if db.execute(query).fetchone():
+                return False
+        return True
+
+
+def generations_advance(older, newer):
+    """Recognize monotonic rewrites of the same identified generation only."""
+    with closing(sqlite3.connect(f"{older.as_uri()}?mode=ro", uri=True)) as db:
+        db.execute("ATTACH DATABASE ? AS newer", (str(newer),))
+        for schema in ("main", "newer"):
+            if db.execute(f"SELECT 1 FROM {schema}.gen_metadata GROUP BY idx HAVING idx IS NULL OR COUNT(*) != 1 LIMIT 1").fetchone():
+                return False
+        rows = db.execute("""
+            SELECT old.data, current.data FROM main.gen_metadata old
+            LEFT JOIN newer.gen_metadata current ON current.idx = old.idx
+        """)
+        for old, current in rows:
+            if current is None or (old != current and not projection.monotonic_generation_update(old, current)):
+                return False
+        return True
 
 
 def update(source_dir, archive_dir, *, require_index=False):
@@ -104,7 +153,14 @@ def update(source_dir, archive_dir, *, require_index=False):
                 if new_in_old and (not old_in_new or temp.stat().st_mtime_ns <= dest.stat().st_mtime_ns):
                     continue  # Older or unchanged observation.
                 if not old_in_new:
-                    raise ArchiveError("Divergent Antigravity conversation versions require recovery", 73)
+                    if generations_advance(temp, dest):
+                        continue  # A prior version of identified generations.
+                    if not generations_advance(dest, temp):
+                        raise ArchiveError("Divergent Antigravity conversation versions require recovery", 73)
+                if not metadata_preserved(dest, temp):
+                    if new_in_old:
+                        continue
+                    raise ArchiveError("Divergent Antigravity conversation metadata requires recovery", 73)
             elif len(retained) >= MAX_DATABASES:
                 raise ArchiveError("Antigravity usage archive exceeds its limit", 72)
             size = temp.stat().st_size

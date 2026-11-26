@@ -48,6 +48,48 @@ class AntigravityArchiveTest(unittest.TestCase):
         self.assertEqual(len(archive.update(self.source, self.retained)), 1)
         self.assertEqual(self.read_rows(), [(0, b"first"), (1, b"second")])
 
+    def test_identified_monotonic_rewrite_and_new_row_advance_archive(self):
+        p = archive.projection
+        def scalar(field, value):
+            return p.enc(field << 3) + p.enc(value)
+        def blob(field, value):
+            return p.enc((field << 3) | 2) + p.enc(len(value)) + value
+        def generation(identity, input_count):
+            usage = scalar(2, input_count) + scalar(10, 2) + blob(11, p.response_id(identity))
+            return blob(1, blob(4, usage) + blob(19, b"fixture-model"))
+        original = generation(b"first", 10)
+        advanced = generation(b"first", 20)
+        new_row = generation(b"second", 5)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=?", (original,))
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=? WHERE idx=0", (advanced,))
+            db.execute("INSERT INTO gen_metadata VALUES (1,?)", (new_row,))
+        archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, advanced), (1, new_row)])
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=? WHERE idx=0", (generation(b"first", 5),))
+        archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, advanced), (1, new_row)])
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("UPDATE gen_metadata SET data=? WHERE idx=0", (generation(b"other", 30),))
+        with self.assertRaisesRegex(archive.ArchiveError, "Divergent"):
+            archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, advanced), (1, new_row)])
+
+    def test_new_generations_do_not_erase_retained_workspace_or_step_metadata(self):
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (b"workspace",))
+            db.execute("INSERT INTO steps(idx,step_type,metadata) VALUES (1,15,?)", (b"clock",))
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("INSERT INTO gen_metadata VALUES (1,?)", (b"second",))
+            db.execute("DELETE FROM steps")
+        with self.assertRaisesRegex(archive.ArchiveError, "metadata"):
+            archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, b"first")])
+
     def test_divergent_versions_fail_without_replacing_archive(self):
         archive.update(self.source, self.retained)
         with closing(sqlite3.connect(self.db)) as db, db:

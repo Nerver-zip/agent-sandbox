@@ -210,7 +210,10 @@ class OfficialCollectorTest(unittest.TestCase):
     def test_antigravity_duplicate_survives_partial_source_deletion(self):
         self.check_antigravity_retention(remove_one=True)
 
-    def check_antigravity_retention(self, remove_one):
+    def test_antigravity_monotonic_generation_update_and_restore(self):
+        self.check_antigravity_retention(remove_one=False, rewrite=True)
+
+    def check_antigravity_retention(self, remove_one, rewrite=False):
         # Upstream's documented protobuf wire fields, generated without real user data.
         def varint(value):
             result = bytearray()
@@ -285,6 +288,24 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals(), (counts, costs))
+        if rewrite:
+            updated_usage = (number(1, 1132) + number(2, 700) + number(5, 16000) +
+                             number(9, 40) + number(10, 300) + blob(11, b"response-1"))
+            updated_row = blob(1, blob(2, blob(3, fake_secret)) + blob(4, updated_usage) +
+                               blob(19, b"gemini-3-flash-a"))
+            writers[1].execute("UPDATE gen_metadata SET data=? WHERE idx=0", (updated_row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            advanced_counts, advanced_costs = self.totals()
+            self.assertEqual(advanced_counts, {**counts, "antigravity": 33880})
+            self.assertGreater(advanced_costs["antigravity"], costs["antigravity"])
+            writers[1].execute("UPDATE gen_metadata SET data=? WHERE idx=0", (row,))
+            writers[1].commit()
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (advanced_counts, advanced_costs))
+            counts, costs = advanced_counts, advanced_costs
         if remove_one:
             writers[0].close()
             first_db = directory / "session-0.db"

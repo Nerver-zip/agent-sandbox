@@ -164,3 +164,72 @@ def project_database(source, target):
             for idx, kind, data in src.execute("SELECT idx,step_type,metadata FROM steps WHERE metadata IS NOT NULL"):
                 dst.execute("INSERT INTO steps VALUES (?,?,?)", (idx, kind, project(data, STEP)))
     return True
+
+
+def _unique_fields(data):
+    """Return projected fields only when their interpretation is unambiguous."""
+    result = {}
+    for number, wire, value, raw in fields(data):
+        if number in result:
+            raise ValueError("duplicate projected field")
+        result[number] = (wire, value, raw)
+    return result
+
+
+def monotonic_generation_update(old, new):
+    """Accept only the same identified generation with nondecreasing counters.
+
+    This compares raw counter fields; Tokscale still interprets and prices the
+    resulting record. Other changed fields, missing identities, and duplicate
+    fields remain ambiguous and are rejected.
+    """
+    try:
+        a = _unique_fields(old)
+        b = _unique_fields(new)
+        if set(a) != set(b) or 1 not in a or any(a[k][2] != b[k][2] for k in a if k != 1):
+            return False
+        if a[1][0] != 2 or b[1][0] != 2:
+            return False
+        a = _unique_fields(a[1][1])
+        b = _unique_fields(b[1][1])
+        if set(a) != set(b) or 4 not in a or any(a[k][2] != b[k][2] for k in a if k != 4):
+            return False
+        if a[4][0] != 2 or b[4][0] != 2:
+            return False
+        a = _unique_fields(a[4][1])
+        b = _unique_fields(b[4][1])
+        if 11 not in a or 11 not in b or a[11][0] != 2 or b[11][0] != 2 or a[11][1] != b[11][1]:
+            return False
+        identity = a[11][1]
+        if len(identity) != 64 or any(c not in b"0123456789abcdef" for c in identity):
+            return False
+        counters = {2, 3, 4, 5, 9, 10}
+        for key in (set(a) | set(b)) - counters:
+            if key not in a or key not in b or a[key][2] != b[key][2]:
+                return False
+        def value(item):
+            if item is None:
+                return 0
+            wire, _, raw = item
+            if wire != 0:
+                raise ValueError("invalid counter")
+            _, pos = read_varint(raw, 0)
+            number, end = read_varint(raw, pos)
+            if end != len(raw):
+                raise ValueError("invalid counter")
+            return number
+        before = {key: value(a.get(key)) for key in counters}
+        after = {key: value(b.get(key)) for key in counters}
+        if any(after[key] < before[key] for key in counters):
+            return False
+        # Tokscale falls back to total output minus reasoning when response
+        # output is absent. Increasing the raw counters can still *reduce*
+        # the reported response-output component in that representation.
+        # Reject such representation changes instead of reimplementing the
+        # scanner's output reconciliation here.
+        if before[10] == 0 and before[3] > 0 and any(
+                after[key] != before[key] for key in (3, 9, 10)):
+            return False
+        return True
+    except (TypeError, ValueError):
+        return False

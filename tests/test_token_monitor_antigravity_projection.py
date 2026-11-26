@@ -86,6 +86,25 @@ class ProjectionTest(unittest.TestCase):
         packed = projection.enc(37) + b"fixture-private-value"
         self.assertEqual(projection.project(blob(2, packed), projection.GEN), blob(2, projection.enc(37)))
 
+    def test_only_monotonic_same_response_generation_updates_are_safe(self):
+        identity = projection.response_id(b"response")
+        def generation(input_count, output_count, response=identity, model=b"fixture-model"):
+            usage = scalar(2, input_count) + scalar(10, output_count) + blob(11, response)
+            return blob(1, blob(4, usage) + blob(19, model)) + scalar(2, 3)
+        original = generation(10, 2)
+        self.assertTrue(projection.monotonic_generation_update(original, generation(15, 3)))
+        self.assertFalse(projection.monotonic_generation_update(original, generation(9, 3)))
+        self.assertFalse(projection.monotonic_generation_update(original, generation(15, 3, projection.response_id(b"other"))))
+        self.assertFalse(projection.monotonic_generation_update(original, generation(15, 3, model=b"other-model")))
+        self.assertFalse(projection.monotonic_generation_update(original, generation(15, 3, b"raw-provider-id")))
+        # A new explicit response-output field can reduce what Tokscale
+        # reports even when every raw counter increases.
+        old_fallback = blob(1, blob(4, scalar(3, 100) + blob(11, identity)))
+        changed_representation = blob(1, blob(4, scalar(3, 100) + scalar(10, 1) + blob(11, identity)))
+        self.assertFalse(projection.monotonic_generation_update(old_fallback, changed_representation))
+        self.assertFalse(projection.monotonic_generation_update(original, original + blob(1, b"duplicate")))
+        self.assertFalse(projection.monotonic_generation_update(b"not protobuf", generation(15, 3)))
+
     def test_invalid_wire_data_fails_closed(self):
         for value in (b"\\x00", b"\\x0a\\x80", b"\\x0a\\x02x", b"\\x0b", b"\\x09x", b"\\xff" * 11):
             with self.subTest(value=value), self.assertRaises(ValueError):

@@ -64,6 +64,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, sqlite3.Error, tarfile.TarError, ValueError):
+    except (OSError, sqlite3.Error, tarfile.TarError, TypeError, ValueError):
         # Do not include provider data or exception text in container logs.
         raise SystemExit(1)

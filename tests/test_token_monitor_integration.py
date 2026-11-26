@@ -443,6 +443,77 @@ class OfficialCollectorTest(unittest.TestCase):
             cost = 100 * rates["input_cost_per_token"] + 15 * rates["output_cost_per_token"]
             self.assertAlmostEqual(period["clientModelCosts"]["antigravity"][route], cost, places=8)
 
+    def test_antigravity_synthetic_parent_child_shared_response_and_workers(self):
+        self.check_synthetic_parent_child(shared_identity=True)
+
+    def test_antigravity_synthetic_parent_child_without_identity_is_not_deduplicated(self):
+        self.check_synthetic_parent_child(shared_identity=False)
+
+    def check_synthetic_parent_child(self, shared_identity):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        def generation(response, model, inputs, output):
+            usage = number(2, inputs) + number(10, output) + blob(11, response)
+            return blob(1, blob(4, usage) + blob(19, model))
+
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Fixture-Project")) + blob(2, number(1, stamp))
+        planner = b"gemini-pro-orchestrator-neon"
+        worker = b"gemini-flash-worker-agy"
+        shared = b"shared" if shared_identity else b""
+        sessions = {
+            "parent.db": [(0, generation(b"planner", planner, 100, 10)),
+                          (1, generation(shared, worker, 50, 5))],
+            "child.db": [(0, generation(shared, worker, 50, 5)),
+                         (1, generation(b"child-only", worker, 30, 3))],
+        }
+        for name, rows in sessions.items():
+            with closing(sqlite3.connect(directory / name)) as db, db:
+                db.executescript("""
+                    CREATE TABLE gen_metadata(idx INTEGER,data BLOB);
+                    CREATE TABLE trajectory_metadata_blob(data BLOB);
+                    CREATE TABLE parent_references(idx INTEGER,data BLOB);
+                    CREATE TABLE steps(idx INTEGER,step_type INTEGER,metadata BLOB,has_subtrajectory INTEGER);
+                """)
+                db.executemany("INSERT INTO gen_metadata VALUES (?,?)", rows)
+                db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+                # Synthetic placeholders only: no real parent-reference encoding is assumed.
+                if name == "child.db":
+                    db.execute("INSERT INTO parent_references VALUES (0,?)", (b"fixture-placeholder",))
+                else:
+                    db.execute("INSERT INTO steps VALUES (0,15,?,1)", (blob(1, number(1, stamp)),))
+        self.monitor.config["providers"] = ["antigravity"]
+        self.publish()
+        generation_dir, = self.monitor.pending()
+        for path in (generation_dir / "home/.gemini/antigravity-cli/conversations").glob("*.db"):
+            with closing(sqlite3.connect(path)) as db:
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+                self.assertNotIn("parent_references", tables)
+                columns = {row[1] for row in db.execute("PRAGMA table_info(steps)")}
+                self.assertNotIn("has_subtrajectory", columns)
+        self.monitor.deliver(generation_dir)
+        period = self.device_record()["periods"]["allTime"]
+        expected = 198 if shared_identity else 253
+        self.assertEqual(period["clients"]["antigravity"], expected)
+        self.assertEqual(period["clientModels"]["antigravity"], {
+            "gemini-pro-orchestrator-neon": 110,
+            "gemini-flash-worker-agy": 88 if shared_identity else 143,
+        })
+        self.assertEqual(self.projects()["fixture-project"]["clients"], {"antigravity": expected})
+        self.assertGreater(period["clientCosts"]["antigravity"], 0)
+        self.assertAlmostEqual(sum(period["clientModelCosts"]["antigravity"].values()),
+                               period["clientCosts"]["antigravity"], places=8)
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.device_record()["periods"]["allTime"]["clients"]["antigravity"], expected)
+
     def test_project_attribution_and_reconciliation_by_provider(self):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])

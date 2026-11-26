@@ -1,4 +1,8 @@
+from contextlib import closing
 import importlib.util
+import io
+import subprocess
+import tarfile
 import os
 import sqlite3
 import tempfile
@@ -31,8 +35,23 @@ class SnapshotTests(unittest.TestCase):
 
     def capture(self, name="snapshot", previous=None, providers=snapshot.ROOTS):
         target = self.tmp / name
-        result = snapshot.capture(self.fd, target, previous, providers)
+        result = snapshot.capture(self.fd, target, previous, providers, self.sanitize_fixture)
         return target, result
+
+    def sanitize_fixture(self, companions, target):
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w") as stream:
+            for index, (_, fd, info) in enumerate(companions):
+                if fd is None:
+                    continue
+                member = tarfile.TarInfo(("usage.db", "usage.db-wal", "usage.db-journal")[index])
+                member.size = info[2]
+                os.lseek(fd, 0, os.SEEK_SET)
+                with os.fdopen(os.dup(fd), "rb") as source:
+                    stream.addfile(member, source)
+        with tempfile.TemporaryDirectory() as work, target.open("xb") as output:
+            subprocess.run(["python3", "-I", str(MODULE.parent / "antigravity_sanitize.py"), work],
+                           input=data.getvalue(), stdout=output, stderr=subprocess.DEVNULL, check=True)
 
     def test_only_supported_sources_keep_bytes_and_source_time(self):
         data = {
@@ -111,9 +130,16 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse((first / "home" / snapshot.OPENCODE / "opencode.db-shm").exists())
         # Exercise SQLite against a private, disposable copy. In production
         # the collector opens this pair inside its own process boundary.
-        with sqlite3.connect(first / "home" / snapshot.OPENCODE / "opencode.db") as reader:
+        with closing(sqlite3.connect(first / "home" / snapshot.OPENCODE / "opencode.db")) as reader:
             self.assertEqual(reader.execute("select value from message").fetchall(), [(1,)])
         writer.rollback()
+
+    def test_antigravity_fails_closed_without_sanitizer(self):
+        self.write(f"{snapshot.ANTIGRAVITY}/conversation.db", b"raw fixture")
+        destination = self.tmp / "unsafe"
+        with self.assertRaisesRegex(snapshot.SnapshotError, "isolated metadata sanitizer"):
+            snapshot.capture(self.fd, destination, None, ["antigravity"])
+        self.assertFalse(destination.exists())
 
     def test_antigravity_allowlist_and_wal_recovery(self):
         directory = self.home / snapshot.ANTIGRAVITY
@@ -122,22 +148,36 @@ class SnapshotTests(unittest.TestCase):
         writer = sqlite3.connect(db)
         self.addCleanup(writer.close)
         writer.execute("PRAGMA journal_mode=WAL")
-        writer.execute("CREATE TABLE usage (value INTEGER)")
-        writer.execute("INSERT INTO usage VALUES (1)")
+        writer.execute("CREATE TABLE gen_metadata (idx INTEGER, data BLOB)")
+        writer.execute("INSERT INTO gen_metadata VALUES (1, ?)", (b"\x0a\x04\x22\x02\x10\x01",))
         writer.commit()
         writer.execute("BEGIN")
-        writer.execute("INSERT INTO usage VALUES (2)")
+        writer.execute("INSERT INTO gen_metadata VALUES (2, ?)", (b"\x0a\x04\x22\x02\x10\x02",))
         self.write(".gemini/antigravity-cli/active_session.env", b"credential")
         self.write(".gemini/antigravity-cli/conversation_summaries.db", b"not selected")
         self.write(".gemini/antigravity-cli/implicit/other.pb", b"not selected")
         self.write(".gemini/antigravity-cli/conversations/unrelated.log", b"not selected")
         first, (count, _) = self.capture(providers=["antigravity"])
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 1)
         paths = {str(p.relative_to(first / "home")) for p in (first / "home").rglob("*") if p.is_file()}
-        self.assertEqual(paths, {f"{snapshot.ANTIGRAVITY}/conversation.db", f"{snapshot.ANTIGRAVITY}/conversation.db-wal"})
-        with sqlite3.connect(first / "home" / snapshot.ANTIGRAVITY / db.name) as reader:
-            self.assertEqual(reader.execute("SELECT * FROM usage").fetchall(), [(1,)])
+        self.assertEqual(paths, {f"{snapshot.ANTIGRAVITY}/conversation.db"})
+        with closing(sqlite3.connect(first / "home" / snapshot.ANTIGRAVITY / db.name)) as reader:
+            self.assertEqual(reader.execute("SELECT idx FROM gen_metadata").fetchall(), [(1,)])
         writer.rollback()
+
+    def test_antigravity_reuses_projected_snapshot_when_source_is_unchanged(self):
+        directory = self.home / snapshot.ANTIGRAVITY
+        directory.mkdir(parents=True)
+        db = directory / "session.db"
+        with closing(sqlite3.connect(db)) as writer, writer:
+            writer.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            writer.execute("INSERT INTO gen_metadata VALUES (0, ?)", (b"\x0a\x04\x22\x02\x10\x01",))
+        first, _ = self.capture(providers=["antigravity"])
+        with mock.patch.object(self, "sanitize_fixture", side_effect=AssertionError("unexpected rerun")):
+            second, result = self.capture("second", first, providers=["antigravity"])
+        self.assertEqual(result, (1, 0))
+        self.assertTrue((first / "home" / snapshot.ANTIGRAVITY / db.name).samefile(
+            second / "home" / snapshot.ANTIGRAVITY / db.name))
 
     def test_antigravity_write_during_capture_is_rejected_then_retried(self):
         directory = self.home / snapshot.ANTIGRAVITY
@@ -146,27 +186,27 @@ class SnapshotTests(unittest.TestCase):
         writer = sqlite3.connect(db)
         self.addCleanup(writer.close)
         writer.execute("PRAGMA journal_mode=WAL")
-        writer.execute("CREATE TABLE usage (value INTEGER)")
-        writer.execute("INSERT INTO usage VALUES (1)")
+        writer.execute("CREATE TABLE gen_metadata (idx INTEGER, data BLOB)")
+        writer.execute("INSERT INTO gen_metadata VALUES (1, ?)", (b"\x0a\x04\x22\x02\x10\x01",))
         writer.commit()
-        original = snapshot.Snapshot.copy
+        original = self.sanitize_fixture
         changed = False
 
-        def mutate_after_database(instance, fd, relative, signature, cache_key=None):
+        def mutate_after_capture(companions, target):
             nonlocal changed
-            original(instance, fd, relative, signature, cache_key)
-            if relative.endswith("live.db") and not changed:
-                writer.execute("INSERT INTO usage VALUES (2)")
+            original(companions, target)
+            if not changed:
+                writer.execute("INSERT INTO gen_metadata VALUES (2, ?)", (b"\x0a\x04\x22\x02\x10\x02",))
                 writer.commit()
                 changed = True
 
-        with mock.patch.object(snapshot.Snapshot, "copy", mutate_after_database):
+        with mock.patch.object(self, "sanitize_fixture", mutate_after_capture):
             with self.assertRaises(snapshot.SnapshotError):
                 self.capture("interrupted", providers=["antigravity"])
         self.assertFalse((self.tmp / "interrupted").exists())
         captured, _ = self.capture("retry", providers=["antigravity"])
-        with sqlite3.connect(captured / "home" / snapshot.ANTIGRAVITY / "live.db") as reader:
-            self.assertEqual(reader.execute("SELECT * FROM usage").fetchall(), [(1,), (2,)])
+        with closing(sqlite3.connect(captured / "home" / snapshot.ANTIGRAVITY / "live.db")) as reader:
+            self.assertEqual(reader.execute("SELECT idx FROM gen_metadata").fetchall(), [(1,), (2,)])
 
     def test_interrupted_capture_discards_generation(self):
         path = self.write(".codex/sessions/a.jsonl", b"{}\n")

@@ -26,7 +26,9 @@ class ProjectionTest(unittest.TestCase):
         chat = blob(2, blob(3, credential)) + blob(4, usage) + blob(19, b"gemini-3-flash-a")
         original = blob(1, chat) + scalar(2, 42) + blob(50, b"unrelated")
         projected = projection.project(original, projection.GEN)
-        self.assertEqual(projected, blob(1, blob(4, usage) + blob(19, b"gemini-3-flash-a")) + scalar(2, 42))
+        projected_usage = (scalar(2, 500) + scalar(5, 16000) + scalar(9, 40) + scalar(10, 300)
+                           + blob(11, projection.response_id(b"response")))
+        self.assertEqual(projected, blob(1, blob(4, projected_usage) + blob(19, b"gemini-3-flash-a")) + scalar(2, 42))
         self.assertNotIn(credential, projected)
 
     def test_projects_timestamp_workspace_and_step_references(self):
@@ -36,7 +38,31 @@ class ProjectionTest(unittest.TestCase):
                          blob(1, blob(1, b"file:///workspace/project")) + blob(2, timestamp))
         step = blob(1, timestamp) + blob(9, blob(11, b"response") + blob(2, b"private")) + blob(20, scalar(3, 4))
         self.assertEqual(projection.project(step, projection.STEP),
-                         blob(1, timestamp) + blob(9, blob(11, b"response")) + blob(20, scalar(3, 4)))
+                         blob(1, timestamp) + blob(9, blob(11, projection.response_id(b"response"))) + blob(20, scalar(3, 4)))
+
+    def test_credential_shaped_model_and_workspace_fail_closed(self):
+        for data, schema in ((blob(19, b"Bearer fixture-private-value"), projection.CHAT),
+                             (blob(1, blob(1, b"file:///home/access_token/project")), projection.TRAJECTORY),
+                             (blob(1, blob(1, b"file:///home/access%5ftoken/project")), projection.TRAJECTORY)):
+            with self.subTest(schema=schema), self.assertRaisesRegex(ValueError, "credential-shaped"):
+                projection.project(data, schema)
+
+    def test_inferred_clock_projects_nested_unknown_fields(self):
+        nested = scalar(1, 1781502653) + blob(3, b"fixture-private-value")
+        self.assertEqual(projection.inferred_clock(nested), scalar(1, 1781502653))
+        raw = b"12345678"
+        self.assertEqual(projection.inferred_clock(raw), raw)
+
+    def test_response_ids_are_pseudonymized_consistently(self):
+        secret = b"fixture-sensitive-response-id"
+        usage = projection.project(blob(11, secret), projection.USAGE)
+        step = projection.project(blob(9, blob(11, secret)), projection.STEP)
+        self.assertNotIn(secret, usage)
+        self.assertNotIn(secret, step)
+        self.assertIn(projection.response_id(secret), usage)
+        self.assertIn(projection.response_id(secret), step)
+        self.assertEqual(projection.project(blob(11, b"  "), projection.USAGE), b"")
+        self.assertEqual(projection.project(blob(11, b"\xff"), projection.USAGE), b"")
 
     def test_database_never_contains_unselected_fixture_secret(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -55,6 +81,10 @@ class ProjectionTest(unittest.TestCase):
                 self.assertEqual(names, {"gen_metadata", "steps"})
                 self.assertEqual(db.execute("SELECT data FROM gen_metadata").fetchone()[0],
                                  blob(1, blob(4, scalar(2, 15))))
+
+    def test_packed_step_index_discards_unneeded_trailing_bytes(self):
+        packed = projection.enc(37) + b"fixture-private-value"
+        self.assertEqual(projection.project(blob(2, packed), projection.GEN), blob(2, projection.enc(37)))
 
     def test_invalid_wire_data_fails_closed(self):
         for value in (b"\\x00", b"\\x0a\\x80", b"\\x0a\\x02x", b"\\x0b", b"\\x09x", b"\\xff" * 11):

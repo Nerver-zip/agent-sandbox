@@ -47,28 +47,93 @@ def enc(n):
     return bytes(out)
 
 
+def safe_text(value):
+    """Reject known credential-shaped text in scanner-visible string fields.
+
+    This is defense in depth, not a proof that arbitrary strings are secret-free.
+    """
+    import re
+    from urllib.parse import unquote
+
+    if len(value) > 4096:
+        raise ValueError("oversized scanner string")
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if re.search(r"(?i)(access[_-]?token|refresh[_-]?token|authorization|bearer\s|private[ _-]?key|github_pat_|ghp_|ya29\.|sk-[a-z0-9]{12,})", unquote(text)):
+        raise ValueError("credential-shaped scanner string")
+    return value
+
+
+def inferred_clock(value):
+    # Upstream accepts an 8-byte scalar or nested numeric Timestamp/epoch.
+    # Preserve the ambiguous 8-byte representation; project longer nested
+    # messages to the numeric fields the scanner reads.
+    if len(value) == 8:
+        return value
+    return project(value, {1: {0, 1}, 2: {0}})
+
+
+def response_id(value, *, strip=False):
+    """Keep stable deduplication without persisting provider response IDs."""
+    import hashlib
+
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text.strip():
+        return None
+    if strip:
+        text = text.strip()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest().encode("ascii")
+
+
 def project(data, schema):
     out = bytearray()
     for number, wire, value, raw in fields(data):
         rule = schema.get(number)
         if rule is None: continue
         if isinstance(rule, dict):
-            if wire != 2: continue
+            if wire != 2:
+                raise ValueError("unexpected nested wire type")
             projected = project(value, rule)
             out.extend(enc((number << 3) | 2)); out.extend(enc(len(projected))); out.extend(projected)
+        elif isinstance(rule, tuple):
+            if wire == 0:
+                out.extend(raw)
+            elif wire == 2:
+                number_value, _ = read_varint(value, 0)
+                packed = enc(number_value)
+                out.extend(enc((number << 3) | 2))
+                out.extend(enc(len(packed)))
+                out.extend(packed)
+            else:
+                raise ValueError("unexpected packed wire type")
+        elif callable(rule):
+            if wire != 2:
+                raise ValueError("unexpected bytes wire type")
+            projected = rule(value)
+            if projected is not None:
+                out.extend(enc((number << 3) | 2))
+                out.extend(enc(len(projected)))
+                out.extend(projected)
         elif wire in rule:
             out.extend(raw)
+        else:
+            raise ValueError("unexpected scalar wire type")
     return bytes(out)
 
 V = {0}
 BYTES = {2}
 TIMESTAMP = {1: V, 2: V}
-USAGE = {1: V, 2: V, 3: V, 4: V, 5: V, 9: V, 10: V, 11: BYTES}
-CHAT = {4: USAGE, 9: {4: TIMESTAMP, 10: BYTES}, 11: TIMESTAMP,
-        12: TIMESTAMP, 19: BYTES, 21: BYTES}
-GEN = {1: CHAT, 2: {0, 2}}
-TRAJECTORY = {1: {1: BYTES}, 2: TIMESTAMP}
-STEP = {1: TIMESTAMP, 9: {11: BYTES}, 20: {3: V}}
+USAGE = {1: V, 2: V, 3: V, 4: V, 5: V, 9: V, 10: V, 11: response_id}
+CHAT = {4: USAGE, 9: {4: TIMESTAMP, 10: inferred_clock}, 11: TIMESTAMP,
+        12: TIMESTAMP, 19: safe_text, 21: safe_text}
+GEN = {1: CHAT, 2: (0, 2)}
+TRAJECTORY = {1: {1: safe_text}, 2: TIMESTAMP}
+STEP = {1: TIMESTAMP, 9: {11: lambda value: response_id(value, strip=True)}, 20: {3: V}}
 
 
 def project_database(source, target):

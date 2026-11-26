@@ -1,11 +1,13 @@
+import io
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/token-monitor"))
@@ -51,6 +53,11 @@ class ConfigurationTest(unittest.TestCase):
         self.assertEqual(manager.configuration()["providers"], ["claude", "codex", "opencode"])
         self.write(providers=["claude", "codex", "opencode", "antigravity"])
         self.assertEqual(manager.configuration()["providers"][-1], "antigravity")
+        self.write(collector_version="v0.98.0", providers=["antigravity"])
+        with self.assertRaisesRegex(manager.ConfigurationError, "requires the pinned collector version"):
+            manager.configuration()
+        self.write(collector_version="v0.98.0", providers=["claude"])
+        self.assertEqual(manager.configuration()["providers"], ["claude"])
 
     def test_projects_are_enabled_by_default_and_can_be_disabled(self):
         self.write()
@@ -98,6 +105,41 @@ class ConfigurationTest(unittest.TestCase):
         self.write(device_id="other-device")
         with self.assertRaises(manager.ConfigurationError):
             manager.Monitor(manager.configuration())
+
+    def test_sanitizer_timeout_removes_worker_and_kills_client(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        source = self.project / "fixture.db"
+        source.write_bytes(b"fixture")
+        fd = os.open(source, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        process = Mock()
+        process.stdin = io.BytesIO()
+        process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 1), 0]
+        with patch.object(manager.subprocess, "Popen", return_value=process), \
+             patch.object(manager.subprocess, "run") as run:
+            with self.assertRaisesRegex(manager.SnapshotError, "timed out"):
+                monitor.sanitize_antigravity([("session.db", fd, [0, 0, 7, 0, 0]),
+                                            ("session.db-wal", None, None),
+                                            ("session.db-journal", None, None)], self.project / "output")
+        process.kill.assert_called_once()
+        self.assertIn("rm", run.call_args.args[0])
+
+    def test_legacy_raw_antigravity_snapshot_is_not_delivered(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        generation = self.state / "old-generation"
+        generation.mkdir()
+        (generation / "index.json").write_text(json.dumps({
+            ".gemini/antigravity-cli/conversations/session.db": [[1, 2, 3, 4, 5], None, None]
+        }))
+        with self.assertRaisesRegex(manager.JobError, "predates sanitization"):
+            monitor.deliver(generation)
+        self.assertTrue(generation.is_dir())
 
     def test_unit_setup_is_idempotent_and_uninstall_cleans_only_owned_units(self):
         with patch.object(manager, "systemctl") as systemctl:

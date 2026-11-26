@@ -10,6 +10,8 @@ import re
 import shutil
 import signal
 import stat
+import tarfile
+import threading
 import subprocess
 import tempfile
 import time
@@ -20,7 +22,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from relay import Hub, HubError, relay
-from snapshot import ROOTS, SnapshotError, capture
+from snapshot import ANTIGRAVITY, ROOTS, SnapshotError, capture
 
 PROJECT = Path(__file__).resolve().parents[2]
 CONFIG = PROJECT / ".token-monitor.json"
@@ -110,6 +112,8 @@ def configuration():
             or any(not isinstance(name, str) or name not in ROOTS for name in providers)
             or len(set(providers)) != len(providers)):
         raise ConfigurationError("providers must list distinct values from claude, codex, opencode and antigravity.")
+    if "antigravity" in providers and version != DEFAULT_VERSION:
+        raise ConfigurationError("Antigravity metadata projection requires the pinned collector version.")
     projects_enabled = data.get("projects_enabled", True)
     if type(projects_enabled) is not bool:
         raise ConfigurationError("projects_enabled must be a boolean.")
@@ -274,7 +278,7 @@ class Monitor:
         self.device = self.load_device()
         context = PROJECT / "scripts/token-monitor"
         source_hash = hashlib.sha256()
-        for name in ("Dockerfile", "collect.py", "restore.cjs", "antigravity_archive.py"):
+        for name in ("Dockerfile", "collect.py", "restore.cjs", "antigravity_archive.py", "antigravity_projection.py", "antigravity_sanitize.py"):
             source_hash.update((context / name).read_bytes())
         self.image = f"agent-sandbox-token-monitor:{config['version']}-{source_hash.hexdigest()[:12]}"
         instance = hashlib.sha256(os.fsencode(PROJECT)).hexdigest()[:16]
@@ -329,6 +333,64 @@ class Monitor:
     def pending(self):
         return sorted(p for p in self.snapshots.iterdir() if GENERATION.fullmatch(p.name))
 
+    def sanitize_antigravity(self, companions, target):
+        """Stream a stable DB and sidecars to an isolated tmpfs-only worker."""
+        name = f"{self.container_name}-sanitize-{uuid.uuid4().hex[:12]}"
+        args = DOCKER + [
+            "run", "--rm", "--init", "-i", "--name", name, "--pull=never",
+            "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+            "--pids-limit=32", "--memory=2g", "--cpus=1.0", "--user", f"{UID}:{UID}",
+            "--log-driver=none", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
+            "--tmpfs", f"/work:rw,nosuid,nodev,noexec,size=1024m,uid={UID},gid={UID},mode=0700",
+            "--entrypoint", "/usr/bin/python3", self.image, "-I", "/opt/antigravity_sanitize.py",
+        ]
+        errors = []
+        with target.open("xb") as output:
+            process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
+                                       env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/root"})
+
+            def stream():
+                try:
+                    with tarfile.open(fileobj=process.stdin, mode="w|") as archive:
+                        for index, (_, fd, info) in enumerate(companions):
+                            if fd is None:
+                                continue
+                            name = ("usage.db", "usage.db-wal", "usage.db-journal")[index]
+                            member = tarfile.TarInfo(name)
+                            member.size = info[2]
+                            os.lseek(fd, 0, os.SEEK_SET)
+                            with os.fdopen(os.dup(fd), "rb") as source:
+                                archive.addfile(member, source)
+                except (OSError, tarfile.TarError) as exc:
+                    errors.append(exc)
+                finally:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+
+            writer = threading.Thread(target=stream, daemon=True)
+            writer.start()
+            try:
+                status = process.wait(timeout=RUN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    subprocess.run(DOCKER + ["rm", "-f", name], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=10, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                finally:
+                    process.kill()
+                    process.wait(timeout=10)
+                raise SnapshotError("Antigravity sanitizer timed out") from None
+            finally:
+                writer.join(timeout=10)
+            if writer.is_alive() or status or errors:
+                raise SnapshotError("Antigravity metadata sanitizer failed")
+            output.flush()
+            if output.tell() == 0:
+                raise SnapshotError("Antigravity metadata sanitizer returned no database")
+
     def publish(self, root, container):
         existing = self.pending()
         if len(existing) >= PENDING_LIMIT:
@@ -340,7 +402,7 @@ class Monitor:
         if staging.exists():
             shutil.rmtree(staging)
         try:
-            files, copied = capture(root, staging, previous, self.config["providers"])
+            files, copied = capture(root, staging, previous, self.config["providers"], self.sanitize_antigravity)
             if existing and previous is not None and copied == 0:
                 if filecmp.cmp(staging / "index.json", previous / "index.json", shallow=False):
                     return
@@ -362,6 +424,14 @@ class Monitor:
                 shutil.rmtree(staging)
 
     def deliver(self, generation):
+        # Draft versions staged raw Antigravity databases. Never deliver a
+        # queued legacy generation as if it had passed the projector.
+        index = json.loads((generation / "index.json").read_text())
+        for path, value in index.items():
+            if path.startswith(ANTIGRAVITY + "/"):
+                if (not path.endswith(".db") or not isinstance(value, dict)
+                        or value.get("format") != "agy-projection-v1"):
+                    raise JobError("Queued Antigravity snapshot predates sanitization; preserve it for recovery.")
         with tempfile.TemporaryDirectory(prefix="relay-", dir=STATE) as directory:
             os.chmod(directory, 0o755)
             with relay(Path(directory) / "ingest.sock", self.hub, self.device) as server:

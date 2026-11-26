@@ -77,8 +77,9 @@ def file_info(fd):
 
 
 class Snapshot:
-    def __init__(self, destination, previous, source_mount):
+    def __init__(self, destination, previous, source_mount, sanitizer=None):
         self.destination = destination
+        self.sanitizer = sanitizer
         self.previous = previous
         self.source_mount = source_mount
         self.old_index = (
@@ -177,9 +178,35 @@ class Snapshot:
                     source, info = self.open_regular(fd, name)
                     companions.append((name, source, info))
                 group = [info for _, _, info in companions]
-                for name, source, info in companions:
-                    if source is not None:
-                        self.copy(source, f"{relative}/{name}", info, group)
+                if relative == ANTIGRAVITY:
+                    if self.sanitizer is None:
+                        raise SnapshotError("Antigravity requires an isolated metadata sanitizer")
+                    key = {"format": "agy-projection-v1", "source": group}
+                    path = f"{relative}/{entry.name}"
+                    target = self.destination / "home" / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    total = sum(info[2] for _, source, info in companions if source is not None)
+                    self.bytes += total
+                    if any(info[2] > MAX_FILE for _, source, info in companions if source is not None) or self.bytes > MAX_BYTES:
+                        raise SnapshotError("Usage history exceeds the snapshot byte limit")
+                    if self.old_index.get(path) == key:
+                        os.link(self.previous / "home" / path, target)
+                    else:
+                        self.sanitizer(companions, target)
+                        if target.stat().st_size > MAX_FILE:
+                            raise SnapshotError("Projected usage exceeds the snapshot byte limit")
+                        os.utime(target, ns=(base_info[3], base_info[3]))
+                        with target.open("rb") as output:
+                            os.fsync(output.fileno())
+                        self.copied += total
+                    self.index[path] = key
+                else:
+                    for name, source, info in companions:
+                        if source is not None:
+                            self.copy(source, f"{relative}/{name}", info, group)
+                for _, source, expected in companions:
+                    if source is not None and file_info(source) != expected:
+                        raise SnapshotError("Usage database changed during collection")
                 # Recheck names for checkpoint, journal creation or replacement.
                 for name, source, expected in companions:
                     current, observed = self.open_regular(fd, name)
@@ -200,12 +227,12 @@ class Snapshot:
                         os.close(source)
 
 
-def capture(root_fd, destination: Path, previous: Path | None, providers):
+def capture(root_fd, destination: Path, previous: Path | None, providers, sanitizer=None):
     """Create a new generation, reusing immutable files from the last capture."""
     destination.mkdir(mode=0o700)
     try:
         source_mount = mount_id(root_fd)
-        snapshot = Snapshot(destination, previous, source_mount)
+        snapshot = Snapshot(destination, previous, source_mount, sanitizer)
         home = open_dir(root_fd, "home/agent", source_mount)
         if home is None:
             raise SnapshotError("Workspace home is absent or on an unexpected mount")

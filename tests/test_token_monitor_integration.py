@@ -244,7 +244,8 @@ class OfficialCollectorTest(unittest.TestCase):
             writer.executescript("CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER); CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB);")
             usage = (number(1, 1132) + number(2, 500) + number(5, 16000) +
                      number(9, 40) + number(10, 300) + blob(11, f"response-{index}".encode()))
-            row = blob(1, blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+            fake_secret = b'{"access_token":"fixture-not-a-real-token"}'
+            row = blob(1, blob(2, blob(3, fake_secret)) + blob(4, usage) + blob(19, b"gemini-3-flash-a"))
             meta = blob(1, blob(1, b"file:///home/agent/workspace/Antigravity-Project")) + blob(2, number(1, stamp))
             writer.execute("INSERT INTO gen_metadata VALUES (0, ?, 0)", (row,))
             writer.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", (meta,))
@@ -255,7 +256,13 @@ class OfficialCollectorTest(unittest.TestCase):
             writer.commit()
         self.monitor.config["providers"].append("antigravity")
         self.publish()
+        for path in self.monitor.pending()[0].rglob("*"):
+            if path.is_file():
+                self.assertNotIn(fake_secret, path.read_bytes())
         self.monitor.deliver(self.monitor.pending()[0])
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(fake_secret, path.read_bytes())
         counts, costs = self.totals()
         self.assertEqual(counts, {**original[0], "antigravity": 33680})
         # Calculate independently from the actual image's pinned pricing

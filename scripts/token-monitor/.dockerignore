@@ -3,3 +3,5 @@
 !collect.py
 !restore.cjs
 !antigravity_archive.py
+!antigravity_projection.py
+!antigravity_sanitize.py

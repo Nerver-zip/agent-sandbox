@@ -1,6 +1,7 @@
 from contextlib import closing
 import importlib.util
 import io
+import json
 import subprocess
 import tarfile
 import os
@@ -184,6 +185,27 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(result, (1, 0))
         self.assertTrue((first / "home" / snapshot.ANTIGRAVITY / db.name).samefile(
             second / "home" / snapshot.ANTIGRAVITY / db.name))
+
+    def test_antigravity_sanitizer_change_invalidates_unchanged_source_cache(self):
+        directory = self.home / snapshot.ANTIGRAVITY
+        directory.mkdir(parents=True)
+        db = directory / "session.db"
+        with closing(sqlite3.connect(db)) as writer, writer:
+            writer.execute("CREATE TABLE gen_metadata(idx INTEGER, data BLOB)")
+            writer.execute("INSERT INTO gen_metadata VALUES (0, ?)", (b"\x0a\x04\x22\x02\x10\x01",))
+        first, _ = self.capture(providers=["antigravity"])
+        with mock.patch.object(snapshot, "SANITIZER_REVISION", "new-sanitizer"):
+            second, result = self.capture("changed-sanitizer", first, providers=["antigravity"])
+        self.assertGreater(result[1], 0)
+        self.assertFalse((first / "home" / snapshot.ANTIGRAVITY / db.name).samefile(
+            second / "home" / snapshot.ANTIGRAVITY / db.name))
+
+        index_path = first / "index.json"
+        index = json.loads(index_path.read_text())
+        del index[f"{snapshot.ANTIGRAVITY}/{db.name}"]["sanitizer"]
+        index_path.write_text(json.dumps(index))
+        _, result = self.capture("legacy-cache", first, providers=["antigravity"])
+        self.assertGreater(result[1], 0)
 
     def test_antigravity_write_during_capture_is_rejected_then_retried(self):
         directory = self.home / snapshot.ANTIGRAVITY

@@ -1,6 +1,7 @@
 """Copy the supported usage sources without traversing sandbox links or mounts."""
 
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -12,6 +13,10 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location("antigravity_projection", Path(__file__).with_name("antigravity_projection.py"))
 projection = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(projection)
+SANITIZER_REVISION = hashlib.sha256(
+    b"\0".join(Path(__file__).with_name(name).read_bytes() for name in
+               ("antigravity_projection.py", "antigravity_sanitize.py"))
+).hexdigest()
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -192,7 +197,7 @@ class Snapshot:
                 if relative == ANTIGRAVITY:
                     if self.sanitizer is None:
                         raise SnapshotError("Antigravity requires an isolated metadata sanitizer")
-                    key = {"format": "agy-projection-v1", "source": group}
+                    key = {"format": "agy-projection-v1", "sanitizer": SANITIZER_REVISION, "source": group}
                     path = f"{relative}/{entry.name}"
                     target = self.destination / "home" / path
                     target.parent.mkdir(parents=True, exist_ok=True)

@@ -155,6 +155,15 @@ class OfficialCollectorTest(unittest.TestCase):
         return period["projects"]
 
     def test_antigravity_upgrade_retention_and_restore(self):
+        self.check_antigravity_retention(remove_one=False)
+
+    @unittest.expectedFailure
+    def test_antigravity_duplicate_survives_partial_source_deletion(self):
+        # Known archive limitation: the surviving copy is counted alongside
+        # the archived session after the scanner's chosen source disappears.
+        self.check_antigravity_retention(remove_one=True)
+
+    def check_antigravity_retention(self, remove_one):
         # Upstream's documented protobuf wire fields, generated without real user data.
         def varint(value):
             result = bytearray()
@@ -212,6 +221,18 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals(), (counts, costs))
+        if remove_one:
+            writers[0].close()
+            first_db = directory / "session-0.db"
+            moved = directory.parent / "removed.db"
+            first_db.rename(moved)
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            moved.rename(first_db)
+            self.publish()
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
         saved = directory.rename(directory.with_name("saved"))
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])

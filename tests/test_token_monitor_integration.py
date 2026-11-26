@@ -249,6 +249,15 @@ class OfficialCollectorTest(unittest.TestCase):
             backup.rename(compact)
             self.monitor.deliver(self.monitor.pending()[0])
             self.assertEqual(self.totals(), (counts, costs))
+            retained_file = compact / "session-0.db"
+            removed_file = retained_file.rename(self.monitor.collector_state / "removed-usage.db")
+            self.publish()
+            with self.assertRaisesRegex(manager.JobError, "usage archive is missing"):
+                self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
+            removed_file.rename(retained_file)
+            self.monitor.deliver(self.monitor.pending()[0])
+            self.assertEqual(self.totals(), (counts, costs))
         saved = directory.rename(directory.with_name("saved"))
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])

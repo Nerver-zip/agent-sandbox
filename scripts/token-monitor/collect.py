@@ -67,7 +67,7 @@ def prepare():
         marker = DATA / "antigravity-usage-required"
         if marker.exists() and not archive.is_dir():
             raise antigravity_archive.ArchiveError("The Antigravity usage archive is missing", 74)
-        retained = antigravity_archive.update(conversations, archive)
+        retained = antigravity_archive.update(conversations, archive, require_index=marker.exists())
         if not marker.exists():
             with marker.open("x") as file:
                 file.write("1\n")

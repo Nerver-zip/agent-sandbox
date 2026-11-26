@@ -2,6 +2,7 @@
 
 from contextlib import closing
 import filecmp
+import json
 import os
 import sqlite3
 import tempfile
@@ -54,7 +55,7 @@ def generations_subset(older, newer):
         return db.execute(query).fetchone() is None
 
 
-def update(source_dir, archive_dir):
+def update(source_dir, archive_dir, *, require_index=False):
     """Atomically retain compatible observations; return retained DB paths.
 
     A divergent version cannot be merged safely using opaque upstream records.
@@ -63,9 +64,25 @@ def update(source_dir, archive_dir):
     archive_dir.mkdir(parents=True, exist_ok=True)
     # The host lock serializes collectors. An interrupted previous job may
     # have left a private, uncommitted candidate; never scan it as a session.
-    for stale in archive_dir.glob(".usage-*"):
-        stale.unlink()
+    for pattern in (".usage-*", ".index-*"):
+        for stale in archive_dir.glob(pattern):
+            stale.unlink()
     retained = list(archive_dir.glob("*.db"))
+    index = archive_dir / ".index.json"
+    if index.exists():
+        try:
+            expected = json.loads(index.read_text())
+            if (not isinstance(expected, list) or len(expected) > MAX_DATABASES
+                    or any(not isinstance(name, str) or Path(name).name != name
+                           or not name.endswith(".db") for name in expected)
+                    or len(expected) != len(set(expected))):
+                raise ValueError("invalid archive index")
+            if not set(expected).issubset({path.name for path in retained}):
+                raise ValueError("missing archive database")
+        except (OSError, ValueError, TypeError):
+            raise ArchiveError("The Antigravity usage archive is incomplete; restore it from backup", 74) from None
+    elif require_index:
+        raise ArchiveError("The Antigravity usage archive index is missing; restore it from backup", 74)
     if len(retained) > MAX_DATABASES or sum(p.stat().st_size for p in retained) > MAX_BYTES:
         raise ArchiveError("Antigravity usage archive exceeds its limit", 72)
     used = sum(p.stat().st_size for p in retained)
@@ -107,4 +124,22 @@ def update(source_dir, archive_dir):
                 retained.append(dest)
         finally:
             temp.unlink(missing_ok=True)
-    return sorted(archive_dir.glob("*.db"))
+    retained = sorted(archive_dir.glob("*.db"))
+    names = [path.name for path in retained]
+    if not index.exists() or expected != names:
+        fd, temp_name = tempfile.mkstemp(prefix=".index-", dir=archive_dir)
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as file:
+                json.dump(names, file)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temp, index)
+            directory = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temp.unlink(missing_ok=True)
+    return retained

@@ -64,6 +64,32 @@ class AntigravityArchiveTest(unittest.TestCase):
         self.assertEqual(self.read_rows(), [(0, b"first")])
         self.assertFalse(list(self.retained.glob(".usage-*")))
 
+    def test_missing_database_and_index_stop_collection(self):
+        archive.update(self.source, self.retained)
+        original = self.retained / self.db.name
+        backup = original.read_bytes()
+        original.unlink()
+        with self.assertRaises(archive.ArchiveError) as error:
+            archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(error.exception.exit_code, 74)
+        self.assertFalse(original.exists())
+        original.write_bytes(backup)
+        (self.retained / ".index.json").unlink()
+        with self.assertRaises(archive.ArchiveError) as error:
+            archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(error.exception.exit_code, 74)
+
+    def test_extra_database_after_interrupted_index_update_is_retained(self):
+        archive.update(self.source, self.retained)
+        second = self.retained / "new-session.db"
+        second.write_bytes((self.retained / self.db.name).read_bytes())
+        self.db.unlink()
+        self.assertEqual([p.name for p in archive.update(self.source, self.retained, require_index=True)],
+                         ["new-session.db", "session.db"])
+        second.unlink()
+        with self.assertRaises(archive.ArchiveError):
+            archive.update(self.source, self.retained, require_index=True)
+
     def test_failed_atomic_replace_leaves_previous_copy(self):
         archive.update(self.source, self.retained)
         with closing(sqlite3.connect(self.db)) as db, db:

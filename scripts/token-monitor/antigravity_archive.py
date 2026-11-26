@@ -2,9 +2,11 @@
 
 from contextlib import closing
 import importlib.util
+import hashlib
 import filecmp
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -150,6 +152,63 @@ def merge_disjoint(older, candidate):
         return True
 
 
+def checksum(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def state_path(path):
+    # Do not embed an untrusted session filename in a metadata path.
+    key = hashlib.sha256(os.fsencode(path.name)).hexdigest()
+    return path.parent / f".checksum-{key}.json"
+
+
+def durable_json(path, value):
+    fd, temp_name = tempfile.mkstemp(prefix=".atomic-", dir=path.parent)
+    temporary = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w") as file:
+            json.dump(value, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def verify_checksum(path, *, legacy=False):
+    state = state_path(path)
+    try:
+        digest = checksum(path)
+    except OSError:
+        raise ArchiveError("The Antigravity usage archive is unreadable; restore it from backup", 74) from None
+    if not state.exists() and legacy:
+        durable_json(state, {"name": path.name, "hashes": [digest]})
+        return digest
+    try:
+        value = json.loads(state.read_text())
+        hashes = value["hashes"]
+        if (value.get("name") != path.name or not isinstance(hashes, list)
+                or not 1 <= len(hashes) <= 2
+                or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in hashes)
+                or digest not in hashes):
+            raise ValueError("archive checksum mismatch")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        raise ArchiveError("The Antigravity usage archive is incomplete or corrupt; restore it from backup", 74) from None
+    if len(hashes) != 1:
+        # A previous interruption occurred on either side of an atomic replace.
+        durable_json(state, {"name": path.name, "hashes": [digest]})
+    return digest
+
+
 def update(source_dir, archive_dir, *, require_index=False):
     """Atomically retain compatible observations; return retained DB paths.
 
@@ -159,14 +218,20 @@ def update(source_dir, archive_dir, *, require_index=False):
     archive_dir.mkdir(parents=True, exist_ok=True)
     # The host lock serializes collectors. An interrupted previous job may
     # have left a private, uncommitted candidate; never scan it as a session.
-    for pattern in (".usage-*", ".index-*"):
+    for pattern in (".usage-*", ".index-*", ".atomic-*"):
         for stale in archive_dir.glob(pattern):
             stale.unlink()
     retained = list(archive_dir.glob("*.db"))
     index = archive_dir / ".index.json"
+    legacy = not index.exists()
+    expected = []
     if index.exists():
         try:
-            expected = json.loads(index.read_text())
+            document = json.loads(index.read_text())
+            legacy = isinstance(document, list)
+            expected = document if legacy else document["files"]
+            if not legacy and document.get("version") != 2:
+                raise ValueError("invalid archive version")
             if (not isinstance(expected, list) or len(expected) > MAX_DATABASES
                     or any(not isinstance(name, str) or Path(name).name != name
                            or not name.endswith(".db") for name in expected)
@@ -174,13 +239,19 @@ def update(source_dir, archive_dir, *, require_index=False):
                 raise ValueError("invalid archive index")
             if not set(expected).issubset({path.name for path in retained}):
                 raise ValueError("missing archive database")
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
             raise ArchiveError("The Antigravity usage archive is incomplete; restore it from backup", 74) from None
     elif require_index:
         raise ArchiveError("The Antigravity usage archive index is missing; restore it from backup", 74)
     if len(retained) > MAX_DATABASES or sum(p.stat().st_size for p in retained) > MAX_BYTES:
         raise ArchiveError("Antigravity usage archive exceeds its limit", 72)
     used = sum(p.stat().st_size for p in retained)
+    hashes = {path.name: verify_checksum(path, legacy=legacy) for path in retained}
+    # Establish checksums before upgrading the manifest. An interrupted upgrade
+    # can safely retry the old format; the reverse order could accept lost data.
+    if legacy:
+        durable_json(index, {"version": 2, "files": sorted(path.name for path in retained)})
+        expected = sorted(path.name for path in retained)
     for source in sorted(source_dir.glob("*.db")):
         dest = archive_dir / source.name
         fd, temp_name = tempfile.mkstemp(prefix=".usage-", dir=archive_dir)
@@ -219,12 +290,19 @@ def update(source_dir, archive_dir, *, require_index=False):
                 raise ArchiveError("Antigravity usage archive exceeds its limit", 72)
             with temp.open("rb") as file:
                 os.fsync(file.fileno())
+            new_hash = checksum(temp)
+            previous_hash = hashes.get(dest.name)
+            allowed = list(dict.fromkeys(item for item in (previous_hash, new_hash) if item))
+            # Write-ahead permits either complete version after a crash.
+            durable_json(state_path(dest), {"name": dest.name, "hashes": allowed})
             os.replace(temp, dest)
             directory = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(directory)
             finally:
                 os.close(directory)
+            durable_json(state_path(dest), {"name": dest.name, "hashes": [new_hash]})
+            hashes[dest.name] = new_hash
             used += size - old_size
             if not old_size:
                 retained.append(dest)
@@ -232,20 +310,6 @@ def update(source_dir, archive_dir, *, require_index=False):
             temp.unlink(missing_ok=True)
     retained = sorted(archive_dir.glob("*.db"))
     names = [path.name for path in retained]
-    if not index.exists() or expected != names:
-        fd, temp_name = tempfile.mkstemp(prefix=".index-", dir=archive_dir)
-        temp = Path(temp_name)
-        try:
-            with os.fdopen(fd, "w") as file:
-                json.dump(names, file)
-                file.flush()
-                os.fsync(file.fileno())
-            os.replace(temp, index)
-            directory = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            temp.unlink(missing_ok=True)
+    if expected != names:
+        durable_json(index, {"version": 2, "files": names})
     return retained

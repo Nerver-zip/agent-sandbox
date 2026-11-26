@@ -215,12 +215,73 @@ class AntigravityArchiveTest(unittest.TestCase):
         archive.update(self.source, self.retained)
         second = self.retained / "new-session.db"
         second.write_bytes((self.retained / self.db.name).read_bytes())
+        archive.durable_json(archive.state_path(second), {"name": second.name, "hashes": [archive.checksum(second)]})
         self.db.unlink()
         self.assertEqual([p.name for p in archive.update(self.source, self.retained, require_index=True)],
                          ["new-session.db", "session.db"])
         second.unlink()
         with self.assertRaises(archive.ArchiveError):
             archive.update(self.source, self.retained, require_index=True)
+
+    def test_corrupt_retained_database_and_missing_checksum_stop_collection(self):
+        archive.update(self.source, self.retained)
+        retained = self.retained / self.db.name
+        original = retained.read_bytes()
+        retained.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        self.db.unlink()
+        with self.assertRaises(archive.ArchiveError) as error:
+            archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(error.exception.exit_code, 74)
+        retained.write_bytes(original)
+        archive.state_path(retained).unlink()
+        with self.assertRaises(archive.ArchiveError) as error:
+            archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(error.exception.exit_code, 74)
+
+    def test_interruption_before_database_replace_recovers_valid_old_version(self):
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("INSERT INTO gen_metadata VALUES (1, ?)", (b"new",))
+        replace = archive.os.replace
+        def interrupt_database(source, target):
+            if Path(target) == self.retained / self.db.name:
+                raise OSError("interrupted before database replace")
+            return replace(source, target)
+        with patch.object(archive.os, "replace", side_effect=interrupt_database):
+            with self.assertRaises(OSError):
+                archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, b"first")])
+        archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(self.read_rows(), [(0, b"first"), (1, b"new")])
+
+    def test_interruption_after_database_replace_recovers_valid_new_version(self):
+        archive.update(self.source, self.retained)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("INSERT INTO gen_metadata VALUES (1, ?)", (b"new",))
+        original = archive.durable_json
+        def interrupt_final_state(path, value):
+            if path == archive.state_path(self.retained / self.db.name) and len(value["hashes"]) == 1:
+                raise OSError("interrupted after replace")
+            return original(path, value)
+        with patch.object(archive, "durable_json", side_effect=interrupt_final_state):
+            with self.assertRaises(OSError):
+                archive.update(self.source, self.retained)
+        self.assertEqual(self.read_rows(), [(0, b"first"), (1, b"new")])
+        archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(self.read_rows(), [(0, b"first"), (1, b"new")])
+        state = __import__("json").loads(archive.state_path(self.retained / self.db.name).read_text())
+        self.assertEqual(len(state["hashes"]), 1)
+
+    def test_legacy_index_migrates_without_losing_archive(self):
+        archive.update(self.source, self.retained)
+        retained = self.retained / self.db.name
+        archive.state_path(retained).unlink()
+        (self.retained / ".index.json").write_text('["session.db"]')
+        self.db.unlink()
+        archive.update(self.source, self.retained, require_index=True)
+        self.assertEqual(self.read_rows(), [(0, b"first")])
+        self.assertTrue(archive.state_path(retained).is_file())
+        self.assertEqual(__import__("json").loads((self.retained / ".index.json").read_text())["version"], 2)
 
     def test_failed_atomic_replace_leaves_previous_copy(self):
         archive.update(self.source, self.retained)

@@ -71,7 +71,7 @@ def configuration():
         return None
     allowed = {
         "enabled", "hub_url", "secret_file", "interval_seconds", "collector_version",
-        "device_prefix", "device_id", "providers", "timezone",
+        "device_prefix", "device_id", "providers", "timezone", "projects_enabled",
     }
     if data.keys() - allowed:
         raise ConfigurationError("Unknown setting in .token-monitor.json.")
@@ -110,6 +110,9 @@ def configuration():
             or any(not isinstance(name, str) or name not in ROOTS for name in providers)
             or len(set(providers)) != len(providers)):
         raise ConfigurationError("providers must list distinct values from claude, codex and opencode.")
+    projects_enabled = data.get("projects_enabled", True)
+    if type(projects_enabled) is not bool:
+        raise ConfigurationError("projects_enabled must be a boolean.")
     timezone = data.get("timezone", "UTC")
     try:
         ZoneInfo(timezone)
@@ -118,6 +121,7 @@ def configuration():
     return {
         "hub": Hub(url, secret), "interval": seconds, "version": version, "prefix": prefix,
         "device": device, "providers": providers, "timezone": timezone,
+        "projects_enabled": projects_enabled,
     }
 
 
@@ -376,6 +380,7 @@ class Monitor:
                 "--mount", f"type=bind,src={relay_dir},dst=/relay,readonly",
                 "--env", f"TOKEN_MONITOR_DEVICE_ID={self.device}",
                 "--env", f"TOKEN_MONITOR_CLIENTS={','.join(self.config['providers'])}",
+                "--env", f"TOKEN_MONITOR_PROJECTS_ENABLED={int(self.config['projects_enabled'])}",
                 "--env", f"TZ={self.config['timezone']}", self.image,
             ], timeout=RUN_TIMEOUT, discard=True)
         except BaseException:

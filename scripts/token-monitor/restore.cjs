@@ -1,7 +1,29 @@
 'use strict';
 
+// Keep the native resolver on the recorded workspace path. The collector's
+// filesystem has usage snapshots and state, so it cannot establish a repository
+// identity for a relative path or for one of its own private mount points.
+const projectRoot = require('/opt/token-monitor/src/shared/projectRoot');
+const resolveProjectRoot = projectRoot.resolveProjectRoot;
+const collectorRoots = ['/snapshot', '/work', '/state', '/relay', '/opt/token-monitor', '/opt/tokscale-pricing'];
+function isWorkspacePath(value) {
+  const normalized = value.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  if (!/^(?:[a-z]:)?\/.+/i.test(normalized) || /[\x00-\x1f\x7f]/.test(normalized)) return false;
+  if (normalized.split('/').some(part => part === '.' || part === '..')) return false;
+  return !collectorRoots.some(root => normalized === root || normalized.startsWith(root + '/'));
+}
+projectRoot.resolveProjectRoot = (dir, key) => {
+  if (!isWorkspacePath(dir)) return '';
+  const root = resolveProjectRoot(dir, key);
+  return isWorkspacePath(root) ? root : '';
+};
+
 // Loaded before the official headless agent. Select the newest known session
 // observation and leave period projection and persistence to Token Monitor.
+// Upstream hashes an empty resolved root and can still attach a fallback
+// label. Drop that sentinel before the archive or wire payload sees it.
+const { projectIdentity } = require('/opt/token-monitor/src/shared/sessionMetadata');
+const unattributedProjectId = projectIdentity('.').projectId;
 const storeModule = require('/opt/token-monitor/src/shared/usage/sessionUsageArchiveStore');
 const { applySessionDayArchive, applySessionUsageArchive } = require('/opt/token-monitor/src/shared/usage/sessionUsageArchive');
 const { PERIODS, applyPeriodDelta, emptyPeriod, normalizeClientName } = require('/opt/token-monitor/src/shared/usage');
@@ -16,6 +38,23 @@ dailyArchive.retainDailyHistory = (graphs, options) => {
   historyScan = { graphs, options };
   return retainHistory(graphs, { ...options, writeEnabled: false });
 };
+
+function retainProjectIdentity(summary, archive) {
+  const periods = [...PERIODS.map(name => summary[name]), ...Object.values(summary.nativeRangeDays || {})];
+  for (const period of periods) {
+    for (const [key, session] of Object.entries(period?.sessions || {})) {
+      const retained = archive.sessions[key]?.periods?.allTime;
+      if (retained?.projectLabel && retained.projectId !== unattributedProjectId) {
+        session.projectLabel = retained.projectLabel;
+        if (retained.projectId) session.projectId = retained.projectId;
+        else delete session.projectId;
+      } else if (session.projectId === unattributedProjectId || !session.projectLabel) {
+        delete session.projectId;
+        delete session.projectLabel;
+      }
+    }
+  }
+}
 
 function removeOlderObservations(summary, archive, now) {
   const stale = new Map();
@@ -124,7 +163,9 @@ storeModule.createSessionUsageArchiveStore = function createRestoreAwareStore(op
   const store = createStore(options);
   const capture = store.capture;
   store.capture = (summary, now) => {
-    const stale = removeOlderObservations(summary, store.read(now), now);
+    const archive = store.read(now);
+    retainProjectIdentity(summary, archive);
+    const stale = removeOlderObservations(summary, archive, now);
     const result = capture(summary, now);
     if (!result.error) finishHistory(summary, stale, result.archive, now);
     return result;

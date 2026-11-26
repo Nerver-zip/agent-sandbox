@@ -25,7 +25,7 @@ To provide Docker capabilities to coding agents without exposing the host's Dock
 
 ## Optional Token Monitor integration
 
-The host reads only allowlisted accounting sources and runs the upstream collector in a separate non-root container with its network disabled. A private Unix socket allows the collector to submit usage to the configured Hub through the host. The Hub secret stays outside both containers. The firewall, sandbox bridge and workspace mounts are unchanged. Selected transcripts remain private host data during staging and recovery. [Token Monitor trust boundary and retention](TOKEN_MONITOR.md#trust-boundary)
+The host reads only allowlisted accounting sources and runs the upstream collector in a separate non-root container with its network disabled. A private Unix socket allows the collector to submit usage to the configured Hub through the host. The Hub secret stays outside both containers. The firewall, sandbox bridge and workspace mounts are unchanged. Selected transcripts remain private host data during staging and recovery. By default the Hub receives project folder labels and path-derived identifiers. Repository content, absolute paths and session titles are excluded from the integration's project reporting. [Token Monitor trust boundary and retention](TOKEN_MONITOR.md#trust-boundary)
 
 ## Google Colab backend trust boundary
 

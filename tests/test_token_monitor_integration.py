@@ -48,7 +48,7 @@ class OfficialCollectorTest(unittest.TestCase):
         self.addCleanup(setattr, manager, "STATE", self.saved_state)
         self.monitor = manager.Monitor({
             "hub": self.hub, "device": None, "prefix": "acceptance", "interval": 60,
-            "version": manager.DEFAULT_VERSION, "providers": ["claude", "codex", "opencode"], "timezone": "UTC",
+            "version": manager.DEFAULT_VERSION, "providers": ["claude", "codex", "opencode"], "timezone": "UTC", "projects_enabled": True,
         })
         self.device = self.monitor.device
         self.monitor.image = IMAGE
@@ -94,13 +94,14 @@ class OfficialCollectorTest(unittest.TestCase):
         claude.parent.mkdir(parents=True)
         claude.write_text(json.dumps({
             "type": "assistant", "sessionId": "claude-session", "timestamp": when, "requestId": "claude-request",
+            "cwd": "/home/agent/workspace/Claude-Project",
             "message": {"id": "claude-message", "role": "assistant", "model": "claude-sonnet-4-5",
                         "usage": {"input_tokens": 100, "output_tokens": 10}},
         }) + "\n")
         usage = {"input_tokens": 200, "cached_input_tokens": 50, "output_tokens": 20,
                  "reasoning_output_tokens": 0, "total_tokens": 220}
         codex.write_text("".join(json.dumps({"timestamp": when, **record}) + "\n" for record in [
-            {"type": "session_meta", "payload": {"id": "codex-session", "cwd": "/workspace",
+            {"type": "session_meta", "payload": {"id": "codex-session", "cwd": "/home/agent/workspace/Codex-Project",
                                                  "originator": "codex_cli_rs", "source": "cli"}},
             {"type": "turn_context", "payload": {"turn_id": "turn", "model": "gpt-5.4"}},
             {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage,
@@ -110,7 +111,7 @@ class OfficialCollectorTest(unittest.TestCase):
         legacy = opencode / "storage/message/ses_legacy/msg_legacy.json"
         legacy.parent.mkdir(parents=True)
         message = {"id": "msg_legacy", "sessionID": "ses_legacy", "role": "assistant", "modelID": "gpt-4o",
-                   "providerID": "openai", "time": {"created": ms, "completed": ms + 1},
+                   "providerID": "openai", "path": {"root": "/home/agent/workspace/OpenCode-Legacy"}, "time": {"created": ms, "completed": ms + 1},
                    "tokens": {"input": 40, "output": 4, "reasoning": 0, "cache": {"read": 0, "write": 0}}}
         legacy.write_text(json.dumps(message))
         db = opencode / "opencode.db"
@@ -120,8 +121,9 @@ class OfficialCollectorTest(unittest.TestCase):
             PRAGMA journal_mode=wal;
             CREATE TABLE session_v2(id TEXT PRIMARY KEY, directory TEXT, title TEXT);
             CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, data TEXT);
-            INSERT INTO session_v2 VALUES ('ses_current', '/workspace', 'private fixture title');
+            INSERT INTO session_v2 VALUES ('ses_current', '/home/agent/workspace/OpenCode-Current', 'private fixture title');
         """)
+        message.pop("path")
         message.update(id="msg_current", sessionID="ses_current", tokens={
             "input": 80, "output": 8, "reasoning": 0, "cache": {"read": 0, "write": 0},
         })
@@ -137,14 +139,98 @@ class OfficialCollectorTest(unittest.TestCase):
         finally:
             os.close(fd)
 
-    def totals(self):
+    def device_record(self):
         status, body = self.hub.request("GET", "/api/devices")
         self.assertEqual(status, 200)
-        record, = json.loads(body)["devices"]
-        self.assertEqual(record["deviceId"], self.device)
-        self.assertNotIn("private fixture title", body.decode())
-        period = record["periods"]["allTime"]
+        self.assertNotIn(b"private fixture title", body)
+        self.assertNotIn(b"/home/agent/workspace/", body)
+        return next(record for record in json.loads(body)["devices"] if record["deviceId"] == self.device)
+
+    def totals(self):
+        period = self.device_record()["periods"]["allTime"]
         return period["clients"], period["clientCosts"]
+
+    def projects(self):
+        period = self.device_record()["periods"]["allTime"]
+        return period["projects"]
+
+    def test_project_attribution_and_reconciliation_by_provider(self):
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        record = self.device_record()
+        expected = {
+            "claude-project": {"claude": 110},
+            "codex-project": {"codex": 220},
+            "opencode-current": {"opencode": 88},
+            "opencode-legacy": {"opencode": 44},
+        }
+        self.assertIs(record["projectsEnabled"], True)
+        period = record["periods"]["allTime"]
+        self.assertEqual({key: value["clients"] for key, value in period["projects"].items()}, expected)
+        for name, window in record["periods"].items():
+            with self.subTest(period=name):
+                projects = window["projects"].values()
+                self.assertEqual(sum(row["tokens"] for row in projects), window["totalTokens"])
+                self.assertAlmostEqual(sum(row["costUsd"] for row in projects), window["costUsd"], places=9)
+        self.assertFalse(record.get("allTimeProjectsOmitted", False))
+
+        self.monitor.config["projects_enabled"] = False
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertIs(self.device_record()["projectsEnabled"], False)
+        self.assertEqual(self.projects(), {})
+        self.assertEqual(self.device_record()["periods"]["allTime"]["totalTokens"], period["totalTokens"])
+
+        self.monitor.config["projects_enabled"] = True
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.projects(), period["projects"])
+
+    def test_project_aggregation_matches_native_labels_across_device_paths(self):
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+
+        claude = self.sources[0]
+        claude.unlink()
+        # Distinct sessions on different devices share a project folder label.
+        record = {"type": "assistant", "sessionId": "second-device", "requestId": "second-request",
+                  "cwd": "/different/checkout/claude-project",
+                  "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  "message": {"id": "second-message", "model": "claude-sonnet-4-5",
+                              "usage": {"input_tokens": 15, "output_tokens": 5}}}
+        (claude.parent / "second-device.jsonl").write_text(json.dumps(record) + "\n")
+        peer_state = self.path / "peer"
+        peer_state.mkdir()
+        with patch.object(manager, "STATE", peer_state):
+            peer = manager.Monitor({**self.monitor.config, "providers": ["claude"]})
+            peer.image = self.monitor.image
+            peer.container_name = self.monitor.container_name
+            peer.provision()
+            fd = os.open(self.source, DIR_FLAGS)
+            try:
+                peer.publish(fd, "peer-workspace")
+            finally:
+                os.close(fd)
+            peer.deliver(peer.pending()[0])
+        status, body = self.hub.request("GET", "/api/stats")
+        self.assertEqual(status, 200)
+        project = json.loads(body)["periods"]["allTime"]["projects"]["claude-project"]
+        self.assertEqual(project["clients"], {"claude": 130})
+
+    def test_unresolved_or_collector_paths_are_unattributed(self):
+        claude = self.sources[0]
+        record = json.loads(claude.read_text())
+        for index, location in enumerate(("/snapshot/local-stage", "/opt/token-monitor/runtime",
+                                          "/work/home/backing-dir", "relative/path", "/")):
+            key = f"unresolved-{index}"
+            record.update(cwd=location, sessionId=key, requestId=key)
+            record["message"]["id"] = key
+            (claude.parent / f"{key}.jsonl").write_text(json.dumps(record) + "\n")
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals()[0]["claude"], 660)
+        self.assertEqual(set(self.projects()), {"claude-project", "codex-project", "opencode-current", "opencode-legacy"})
+        self.assertEqual(self.projects()["claude-project"]["tokens"], 110)
 
     def test_historical_import_outage_recreation_restore_and_hub_restart(self):
         self.monitor.provision()
@@ -152,6 +238,7 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         initial = self.totals()
+        initial_projects = self.projects()
         counts, costs = initial
         self.assertEqual(counts, {"claude": 110, "codex": 220, "opencode": 132})
         self.assertEqual(set(costs), set(counts))
@@ -189,9 +276,14 @@ class OfficialCollectorTest(unittest.TestCase):
         self.assertEqual(self.totals(), initial)
         self.home.rmdir()
         restored.rename(self.home)
+        claude = self.sources[0]
+        row = json.loads(claude.read_text())
+        row["cwd"] = "/restored/different-folder-name"
+        claude.write_text(json.dumps(row) + "\n")
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals(), initial)
+        self.assertEqual(self.projects(), initial_projects)
 
     def test_older_backup_keeps_newer_session_versions_and_imports_new_usage(self):
         self.check_older_backup(age_days=5)
@@ -239,6 +331,9 @@ class OfficialCollectorTest(unittest.TestCase):
         expected = {**original_counts, "claude": 140}
         counts, costs = self.totals()
         self.assertEqual(counts, expected)
+        projects = self.projects()
+        self.assertEqual(sum(row["tokens"] for row in projects.values()), sum(expected.values()))
+        self.assertAlmostEqual(sum(row["costUsd"] for row in projects.values()), sum(costs.values()), places=9)
         self.assertGreater(costs["claude"], original_costs["claude"])
         self.assertEqual(costs.get("opencode", 0), original_costs.get("opencode", 0))
         self.assertEqual(costs.get("codex", 0), original_costs.get("codex", 0))
@@ -257,6 +352,7 @@ class OfficialCollectorTest(unittest.TestCase):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])
         prior_totals = self.totals()
+        prior_projects = self.projects()
 
         # Move only the usage archives, as the handoff guide prescribes.
         prior_archive = self.monitor.collector_state / "archive"
@@ -282,6 +378,7 @@ class OfficialCollectorTest(unittest.TestCase):
                 os.close(fd)
             adopted.deliver(adopted.pending()[0])
         self.assertEqual(self.totals(), prior_totals)
+        self.assertEqual(self.projects(), prior_projects)
 
     @unittest.skipUnless(shutil.which("zstd"), "requires zstd to generate a Codex archive fixture")
     def test_compressed_codex_archive_and_jsonl_tails(self):
@@ -338,12 +435,14 @@ while :; do sleep 0.1; done""",
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.monitor.sync()
         self.assertEqual(self.totals()[0], {"claude": 110})
+        self.assertEqual(self.projects()["claude-project"]["tokens"], 110)
         self.monitor.sync(final=True)
         self.assertEqual(manager.workspace()[1], 0)
         self.assertEqual(self.totals()[0], {"claude": 170})
         subprocess.run(["docker", "rm", cid], check=True, stdout=subprocess.DEVNULL)
         self.assertIsNone(manager.workspace())
         self.assertEqual(self.totals()[0], {"claude": 170})
+        self.assertEqual(self.projects()["claude-project"]["tokens"], 170)
 
         recreated = subprocess.check_output([
             "docker", "run", "-d", "--network=none", "--cap-drop=ALL",
@@ -367,6 +466,7 @@ while :; do sleep 0.1; done""",
         restarted.container_name = self.monitor.container_name
         restarted.sync()
         self.assertEqual(self.totals()[0], {"claude": 170})
+        self.assertEqual(self.projects()["claude-project"]["tokens"], 170)
 
 
 if __name__ == "__main__":

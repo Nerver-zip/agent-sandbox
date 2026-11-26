@@ -76,7 +76,7 @@ def main():
             "TOKEN_MONITOR_OPENCODE_LOCAL_LIMITS": "0",
             "TOKEN_MONITOR_SYNC_SESSION_TITLES": "0",
             "TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED": "1",
-            "TOKEN_MONITOR_PROJECTS_ENABLED": "0",
+            "TOKEN_MONITOR_PROJECTS_ENABLED": os.environ["TOKEN_MONITOR_PROJECTS_ENABLED"],
             "TOKSCALE_PRICING_CACHE_ONLY": "1",
             "TZ": os.environ["TZ"],
         }

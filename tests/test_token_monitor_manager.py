@@ -44,6 +44,15 @@ class ConfigurationTest(unittest.TestCase):
         self.assertFalse(self.state.exists())
         self.assertEqual(list(self.units.iterdir()), [])
 
+    def test_projects_are_enabled_by_default_and_can_be_disabled(self):
+        self.write()
+        self.assertIs(manager.configuration()["projects_enabled"], True)
+        self.write(projects_enabled=False)
+        self.assertIs(manager.configuration()["projects_enabled"], False)
+        self.write(projects_enabled="false")
+        with self.assertRaisesRegex(manager.ConfigurationError, "projects_enabled must be a boolean"):
+            manager.configuration()
+
     def test_secret_path_and_url_validation(self):
         self.write(hub_url="https://fixture-user:bad@example.net")
         with self.assertRaises(manager.ConfigurationError):

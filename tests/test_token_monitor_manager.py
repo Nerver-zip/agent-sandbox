@@ -44,6 +44,14 @@ class ConfigurationTest(unittest.TestCase):
         self.assertFalse(self.state.exists())
         self.assertEqual(list(self.units.iterdir()), [])
 
+    def test_provider_default_and_explicit_upgrade(self):
+        self.write()
+        self.assertEqual(manager.configuration()["providers"], ["claude", "codex", "opencode", "antigravity"])
+        self.write(providers=["claude", "codex", "opencode"])
+        self.assertEqual(manager.configuration()["providers"], ["claude", "codex", "opencode"])
+        self.write(providers=["claude", "codex", "opencode", "antigravity"])
+        self.assertEqual(manager.configuration()["providers"][-1], "antigravity")
+
     def test_projects_are_enabled_by_default_and_can_be_disabled(self):
         self.write()
         self.assertIs(manager.configuration()["projects_enabled"], True)

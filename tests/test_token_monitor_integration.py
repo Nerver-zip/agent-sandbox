@@ -154,6 +154,73 @@ class OfficialCollectorTest(unittest.TestCase):
         period = self.device_record()["periods"]["allTime"]
         return period["projects"]
 
+    def test_antigravity_upgrade_retention_and_restore(self):
+        # Upstream's documented protobuf wire fields, generated without real user data.
+        def varint(value):
+            result = bytearray()
+            while value > 127:
+                result.append((value & 127) | 128)
+                value >>= 7
+            result.append(value)
+            return bytes(result)
+
+        def number(field, value):
+            return varint(field << 3) + varint(value)
+
+        def blob(field, value):
+            return varint((field << 3) | 2) + varint(len(value)) + value
+
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        original = self.totals()
+        original_projects = self.projects()
+        device = self.device
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        writers = []
+        for index in range(2):
+            db = directory / f"session-{index}.db"
+            writer = sqlite3.connect(db)
+            writers.append(writer)
+            self.addCleanup(writer.close)
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.executescript("CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER); CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB);")
+            usage = (number(1, 1132) + number(2, 500) + number(5, 16000) +
+                     number(9, 40) + number(10, 300) + blob(11, f"response-{index}".encode()))
+            row = blob(1, blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+            meta = blob(1, blob(1, b"file:///home/agent/workspace/Antigravity-Project")) + blob(2, number(1, stamp))
+            writer.execute("INSERT INTO gen_metadata VALUES (0, ?, 0)", (row,))
+            writer.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", (meta,))
+            if index == 1:
+                duplicate = usage.replace(b"response-1", b"response-0")
+                writer.execute("INSERT INTO gen_metadata VALUES (1, ?, 0)",
+                               (blob(1, blob(4, duplicate) + blob(19, b"gemini-3-flash-a")),))
+            writer.commit()
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        counts, costs = self.totals()
+        self.assertEqual(counts, {**original[0], "antigravity": 33680})
+        self.assertGreater(costs["antigravity"], 0)
+        period = self.device_record()["periods"]["allTime"]
+        self.assertEqual(period["clientModels"]["antigravity"], {"gemini-3.5-flash-high": 33680})
+        self.assertEqual(period["clientCacheReads"]["antigravity"], 32000)
+        self.assertEqual(self.device, device)
+        self.assertEqual({k: self.projects()[k] for k in original_projects}, original_projects)
+        self.assertEqual(self.projects()["antigravity-project"]["clients"], {"antigravity": 33680})
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals(), (counts, costs))
+        saved = directory.rename(directory.with_name("saved"))
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals(), (counts, costs))
+        saved.rename(directory)
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        self.assertEqual(self.totals(), (counts, costs))
+
     def test_project_attribution_and_reconciliation_by_provider(self):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])

@@ -390,7 +390,7 @@ Push or back up workspace changes before updating, as recreating the container r
 
 ## Token Monitor
 
-Optional [Token Monitor accounting](docs/TOKEN_MONITOR.md) reports Claude Code, Codex and OpenCode usage to an independent Hub. Configure it once on the Docker host to preserve usage across sandbox resets. Use the lifecycle scripts below so they can capture final usage before removing the workspace.
+Optional [Token Monitor accounting](docs/TOKEN_MONITOR.md) reports Claude Code, Codex, OpenCode and Antigravity CLI usage to an independent Hub. Configure it once on the Docker host to preserve usage across sandbox resets. Use the lifecycle scripts below so they can capture final usage before removing the workspace.
 
 ## Container lifecycle
 

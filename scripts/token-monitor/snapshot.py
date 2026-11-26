@@ -16,8 +16,10 @@ ROOTS = {
     "codex": ((".codex/sessions", (".jsonl", ".jsonl.zst"), 8),
               (".codex/archived_sessions", (".jsonl", ".jsonl.zst"), 8)),
     "opencode": ((".local/share/opencode/storage/message", ".json", 1),),
+    "antigravity": (),
 }
 OPENCODE = ".local/share/opencode"
+ANTIGRAVITY = ".gemini/antigravity-cli/conversations"
 SKIP_ERRORS = {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}
 MAX_ENTRIES = 500_000
 MAX_BYTES = 8 * 1024**3
@@ -160,9 +162,9 @@ class Snapshot:
                     finally:
                         os.close(source)
 
-    def databases(self, fd):
+    def databases(self, fd, relative, pattern):
         for entry in self.names(fd):
-            if not DB.fullmatch(entry.name):
+            if not pattern.fullmatch(entry.name):
                 continue
             base, base_info = self.open_regular(fd, entry.name)
             if base is None:
@@ -177,21 +179,21 @@ class Snapshot:
                 group = [info for _, _, info in companions]
                 for name, source, info in companions:
                     if source is not None:
-                        self.copy(source, f"{OPENCODE}/{name}", info, group)
+                        self.copy(source, f"{relative}/{name}", info, group)
                 # Recheck names for checkpoint, journal creation or replacement.
                 for name, source, expected in companions:
                     current, observed = self.open_regular(fd, name)
                     if current is not None:
                         os.close(current)
                     if observed != expected:
-                        raise SnapshotError("OpenCode changed its database during collection")
+                        raise SnapshotError("Usage database changed during collection")
                     if source is None:
                         try:
                             os.stat(name, dir_fd=fd, follow_symlinks=False)
                         except FileNotFoundError:
                             pass
                         else:
-                            raise SnapshotError("OpenCode sidecar is not a regular usage file")
+                            raise SnapshotError("Database sidecar is not a regular usage file")
             finally:
                 for _, source, _ in companions:
                     if source is not None:
@@ -221,7 +223,14 @@ def capture(root_fd, destination: Path, previous: Path | None, providers):
                 fd = open_dir(home, OPENCODE, source_mount)
                 if fd is not None:
                     try:
-                        snapshot.databases(fd)
+                        snapshot.databases(fd, OPENCODE, DB)
+                    finally:
+                        os.close(fd)
+            if "antigravity" in providers:
+                fd = open_dir(home, ANTIGRAVITY, source_mount)
+                if fd is not None:
+                    try:
+                        snapshot.databases(fd, ANTIGRAVITY, re.compile(r"[^/]+\.db"))
                     finally:
                         os.close(fd)
         finally:

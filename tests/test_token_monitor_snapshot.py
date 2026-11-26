@@ -115,6 +115,59 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(reader.execute("select value from message").fetchall(), [(1,)])
         writer.rollback()
 
+    def test_antigravity_allowlist_and_wal_recovery(self):
+        directory = self.home / snapshot.ANTIGRAVITY
+        directory.mkdir(parents=True)
+        db = directory / "conversation.db"
+        writer = sqlite3.connect(db)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE usage (value INTEGER)")
+        writer.execute("INSERT INTO usage VALUES (1)")
+        writer.commit()
+        writer.execute("BEGIN")
+        writer.execute("INSERT INTO usage VALUES (2)")
+        self.write(".gemini/antigravity-cli/active_session.env", b"credential")
+        self.write(".gemini/antigravity-cli/conversation_summaries.db", b"not selected")
+        self.write(".gemini/antigravity-cli/implicit/other.pb", b"not selected")
+        self.write(".gemini/antigravity-cli/conversations/unrelated.log", b"not selected")
+        first, (count, _) = self.capture(providers=["antigravity"])
+        self.assertEqual(count, 2)
+        paths = {str(p.relative_to(first / "home")) for p in (first / "home").rglob("*") if p.is_file()}
+        self.assertEqual(paths, {f"{snapshot.ANTIGRAVITY}/conversation.db", f"{snapshot.ANTIGRAVITY}/conversation.db-wal"})
+        with sqlite3.connect(first / "home" / snapshot.ANTIGRAVITY / db.name) as reader:
+            self.assertEqual(reader.execute("SELECT * FROM usage").fetchall(), [(1,)])
+        writer.rollback()
+
+    def test_antigravity_write_during_capture_is_rejected_then_retried(self):
+        directory = self.home / snapshot.ANTIGRAVITY
+        directory.mkdir(parents=True)
+        db = directory / "live.db"
+        writer = sqlite3.connect(db)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE usage (value INTEGER)")
+        writer.execute("INSERT INTO usage VALUES (1)")
+        writer.commit()
+        original = snapshot.Snapshot.copy
+        changed = False
+
+        def mutate_after_database(instance, fd, relative, signature, cache_key=None):
+            nonlocal changed
+            original(instance, fd, relative, signature, cache_key)
+            if relative.endswith("live.db") and not changed:
+                writer.execute("INSERT INTO usage VALUES (2)")
+                writer.commit()
+                changed = True
+
+        with mock.patch.object(snapshot.Snapshot, "copy", mutate_after_database):
+            with self.assertRaises(snapshot.SnapshotError):
+                self.capture("interrupted", providers=["antigravity"])
+        self.assertFalse((self.tmp / "interrupted").exists())
+        captured, _ = self.capture("retry", providers=["antigravity"])
+        with sqlite3.connect(captured / "home" / snapshot.ANTIGRAVITY / "live.db") as reader:
+            self.assertEqual(reader.execute("SELECT * FROM usage").fetchall(), [(1,), (2,)])
+
     def test_interrupted_capture_discards_generation(self):
         path = self.write(".codex/sessions/a.jsonl", b"{}\n")
         old, _ = self.capture()

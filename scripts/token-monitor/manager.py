@@ -109,7 +109,7 @@ def configuration():
     if (not isinstance(providers, list) or not providers
             or any(not isinstance(name, str) or name not in ROOTS for name in providers)
             or len(set(providers)) != len(providers)):
-        raise ConfigurationError("providers must list distinct values from claude, codex and opencode.")
+        raise ConfigurationError("providers must list distinct values from claude, codex, opencode and antigravity.")
     projects_enabled = data.get("projects_enabled", True)
     if type(projects_enabled) is not bool:
         raise ConfigurationError("projects_enabled must be a boolean.")

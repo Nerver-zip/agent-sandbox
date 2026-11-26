@@ -25,34 +25,34 @@ def prepare():
         source = SNAPSHOT / name
         if source.exists():
             (HOME / name).symlink_to(source)
-    source = SNAPSHOT / ".local/share/opencode"
-    if not source.is_dir():
-        return
-    target = HOME / ".local/share/opencode"
-    target.mkdir(parents=True)
-    if (source / "storage").is_dir():
-        (target / "storage").symlink_to(source / "storage")
-    for db in source.glob("*.db"):
-        sidecars = [path for suffix in ("-wal", "-journal")
-                    if (path := db.with_name(db.name + suffix)).is_file()]
-        dest = target / db.name
-        if not sidecars:
-            dest.symlink_to(db)
+    for relative in (".local/share/opencode", ".gemini/antigravity-cli/conversations"):
+        source = SNAPSHOT / relative
+        if not source.is_dir():
             continue
-        shutil.copyfile(db, dest)
-        for sidecar in sidecars:
-            shutil.copyfile(sidecar, dest.with_name(sidecar.name))
-        # SQLite recovers the private copy using its own locks and SHM.
-        # It ignores an incomplete WAL transaction and rolls back a hot journal.
-        connection = sqlite3.connect(dest)
-        try:
-            connection.execute("PRAGMA trusted_schema=OFF")
-            connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if result[0] or connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
-                raise RuntimeError("Could not consolidate the OpenCode SQLite snapshot")
-        finally:
-            connection.close()
+        target = HOME / relative
+        target.mkdir(parents=True)
+        if (source / "storage").is_dir():
+            (target / "storage").symlink_to(source / "storage")
+        for db in source.glob("*.db"):
+            sidecars = [path for suffix in ("-wal", "-journal")
+                        if (path := db.with_name(db.name + suffix)).is_file()]
+            dest = target / db.name
+            if not sidecars:
+                dest.symlink_to(db)
+                continue
+            shutil.copyfile(db, dest)
+            for sidecar in sidecars:
+                shutil.copyfile(sidecar, dest.with_name(sidecar.name))
+            # Recover only a private copy; SQLite ignores incomplete WAL transactions.
+            connection = sqlite3.connect(dest)
+            try:
+                connection.execute("PRAGMA trusted_schema=OFF")
+                connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+                result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if result[0] or connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
+                    raise RuntimeError("Could not consolidate the SQLite usage snapshot")
+            finally:
+                connection.close()
 
 
 def main():

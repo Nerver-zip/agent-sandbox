@@ -16,3 +16,7 @@ scripts/*
 !scripts/gh-wrapper.sh
 !scripts/firewall.sh
 !scripts/agent-notify.sh
+
+.token-monitor/
+.token-monitor.json
+.token-monitor.secret

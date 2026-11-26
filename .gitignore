@@ -7,3 +7,7 @@ __pycache__/
 .pytest_cache/
 .colab/
 backups/
+
+.token-monitor/
+.token-monitor.json
+.token-monitor.secret

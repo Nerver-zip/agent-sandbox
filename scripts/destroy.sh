@@ -7,9 +7,24 @@ DANGER: This permanently deletes the Agent Sandbox container, ephemeral workspac
 SSH host identity, Codex login tokens, Claude credentials and GitHub PAT. You may need to authenticate again.
 Other Docker projects are not targeted. Global Docker build cache is not purged.
 TEXT
-if [[ "${1:-}" != '--yes' ]]; then
+yes=0
+force=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes) yes=1 ;;
+    --force) force=1 ;;
+    *) echo "Usage: $0 [--yes] [--force]" >&2; exit 2 ;;
+  esac
+done
+if (( !yes )); then
   read -r -p 'Type DESTROY to proceed: ' reply
   [[ "$reply" == 'DESTROY' ]] || { echo 'Cancelled.'; exit 1; }
+fi
+if (( !force )); then
+  ./scripts/token-monitor.sh final || {
+    echo 'Token Monitor could not queue the final capture. Resume the workspace and retry, or use --force to destroy without accounting.' >&2
+    exit 1
+  }
 fi
 # Down must happen while Compose .env and bind sources still exist.
 docker compose down --remove-orphans --volumes

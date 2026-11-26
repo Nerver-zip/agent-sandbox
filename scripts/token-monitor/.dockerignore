@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!collect.py
+!restore.cjs

@@ -252,6 +252,48 @@ class OfficialCollectorTest(unittest.TestCase):
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals(), (counts, costs))
 
+    def test_antigravity_explicit_orchestrator_and_worker_models(self):
+        def varint(value):
+            data = bytearray()
+            while value > 127:
+                data.append((value & 127) | 128)
+                value >>= 7
+            data.append(value)
+            return bytes(data)
+
+        def number(field, value):
+            return varint(field << 3) + varint(value)
+
+        def blob(field, value):
+            return varint((field << 3) | 2) + varint(len(value)) + value
+
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        for index, model in enumerate(("gemini-pro-orchestrator-neon", "gemini-flash-worker-agy")):
+            with closing(sqlite3.connect(directory / f"route-{index}.db")) as db, db:
+                db.execute("CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER)")
+                usage = number(2, 100) + number(9, 5) + number(10, 10) + blob(11, f"route-{index}".encode())
+                generation = blob(1, blob(4, usage) + blob(19, model.encode()))
+                db.execute("INSERT INTO gen_metadata VALUES (0, ?, 0)", (generation,))
+        self.monitor.config["providers"].append("antigravity")
+        self.publish()
+        self.monitor.deliver(self.monitor.pending()[0])
+        period = self.device_record()["periods"]["allTime"]
+        self.assertEqual(period["clientModels"]["antigravity"], {
+            "gemini-pro-orchestrator-neon": 115,
+            "gemini-flash-worker-agy": 115,
+        })
+        self.assertEqual(period["clients"]["antigravity"], 230)
+        catalog = json.loads(subprocess.check_output([
+            "docker", "run", "--rm", "--network=none", "--entrypoint", "cat", IMAGE,
+            "/opt/tokscale-pricing/cache/pricing-models-dev.json",
+        ], timeout=20))["data"]
+        for route, model in (("gemini-pro-orchestrator-neon", "google/gemini-4-neon"),
+                             ("gemini-flash-worker-agy", "google/gemini-4-hydrogen")):
+            rates = catalog[model]
+            cost = 100 * rates["input_cost_per_token"] + 15 * rates["output_cost_per_token"]
+            self.assertAlmostEqual(period["clientModelCosts"]["antigravity"][route], cost, places=8)
+
     def test_project_attribution_and_reconciliation_by_provider(self):
         self.publish()
         self.monitor.deliver(self.monitor.pending()[0])

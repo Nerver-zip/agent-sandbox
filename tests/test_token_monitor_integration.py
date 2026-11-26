@@ -653,6 +653,115 @@ class OfficialCollectorTest(unittest.TestCase):
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals()[0], {"claude": 110, "codex": 220, "opencode": 132})
 
+    def test_antigravity_final_capture_and_empty_recreation(self):
+        self.check_antigravity_final_capture(outage=False)
+
+    def test_antigravity_final_capture_recovers_after_hub_outage(self):
+        self.check_antigravity_final_capture(outage=True)
+
+    def check_antigravity_final_capture(self, outage):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        secret = b'{"access_token":"fixture-private-final-value"}'
+        def generation(identifier, inputs, outputs):
+            usage = number(2, inputs) + number(10, outputs) + blob(11, identifier)
+            return blob(1, blob(2, blob(3, secret)) + blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+
+        project = self.path / "workspace-project"
+        project.mkdir()
+        fixture = self.path / "final-fixture"
+        conversations = fixture / ".gemini/antigravity-cli/conversations"
+        conversations.mkdir(parents=True)
+        db_path = conversations / "final-session.db"
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Final-Project")) + blob(2, number(1, stamp))
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.executescript("CREATE TABLE gen_metadata(idx INTEGER, data BLOB); CREATE TABLE trajectory_metadata_blob(data BLOB);")
+            db.execute("INSERT INTO gen_metadata VALUES (0, ?)", (generation(b"initial", 100, 10),))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+        (fixture / "Dockerfile").write_text(
+            f"FROM {IMAGE}\n"
+            f"COPY --chown={os.getuid()}:{os.getgid()} .gemini /home/agent/.gemini\n"
+        )
+        image = f"{self.monitor.container_name}-agy-workspace"
+        self.addCleanup(subprocess.run, ["docker", "image", "rm", image],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "build", "--quiet", "-t", image, str(fixture)],
+                       check=True, stdout=subprocess.DEVNULL, timeout=60)
+        saved_project, manager.PROJECT = manager.PROJECT, project
+        self.addCleanup(setattr, manager, "PROJECT", saved_project)
+        self.monitor.config["providers"] = ["antigravity"]
+        script = """import os, signal, sqlite3, time
+path = '/home/agent/.gemini/antigravity-cli/conversations/final-session.db'
+db = sqlite3.connect(path)
+db.execute('PRAGMA journal_mode=WAL')
+def finish(*_):
+    db.execute('INSERT INTO gen_metadata VALUES (1, ?)', (bytes.fromhex(os.environ['FINAL_ROW']),))
+    db.commit()
+    db.close()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, finish)
+open('/tmp/fixture-ready', 'w').close()
+while True: time.sleep(0.1)
+"""
+        cid = subprocess.check_output([
+            "docker", "run", "-d", "--network=none", "--cap-drop=ALL", "--init",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--label", "com.docker.compose.project=agent-sandbox",
+            "--label", "com.docker.compose.service=workspace",
+            "--label", f"com.docker.compose.project.working_dir={project}",
+            "--env", f"FINAL_ROW={generation(b'final', 50, 5).hex()}",
+            "--entrypoint", "/usr/bin/python3", image, "-c", script,
+        ], text=True, timeout=15).strip()
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", cid],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "exec", cid, "sh", "-c", "while test ! -e /tmp/fixture-ready; do sleep 0.1; done"],
+                       check=True, timeout=10)
+        self.monitor.sync()
+        self.assertEqual(self.totals()[0], {"antigravity": 110})
+        if outage:
+            self.stop_hub()
+        self.monitor.sync(final=True)
+        self.assertEqual(manager.workspace()[1], 0)
+        if outage:
+            self.assertEqual(len(self.monitor.pending()), 1)
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(secret, path.read_bytes())
+        subprocess.run(["docker", "rm", cid], check=True, stdout=subprocess.DEVNULL)
+        if outage:
+            self.start_hub()
+            self.monitor.sync()
+            self.assertEqual(self.monitor.pending(), [])
+        self.assertEqual(self.totals()[0], {"antigravity": 165})
+        self.assertEqual(self.projects()["final-project"]["tokens"], 165)
+        recreated = subprocess.check_output([
+            "docker", "run", "-d", "--network=none", "--cap-drop=ALL",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--label", "com.docker.compose.project=agent-sandbox",
+            "--label", "com.docker.compose.service=workspace",
+            "--label", f"com.docker.compose.project.working_dir={project}",
+            "--entrypoint", "sh", image, "-c",
+            "rm -rf /home/agent/.gemini/antigravity-cli/conversations; exec sleep infinity",
+        ], text=True, timeout=15).strip()
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", recreated],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "exec", recreated, "sh", "-c",
+                        "while test -e /home/agent/.gemini/antigravity-cli/conversations; do sleep 0.1; done"],
+                       check=True, timeout=10)
+        with patch.object(manager, "PROJECT", ROOT):
+            restarted = manager.Monitor(self.monitor.config)
+        restarted.image = IMAGE
+        restarted.container_name = self.monitor.container_name
+        restarted.sync()
+        self.assertEqual(self.totals()[0], {"antigravity": 165})
+        self.assertEqual(self.projects()["final-project"]["tokens"], 165)
+
     def test_controlled_stop_captures_last_write_before_container_removal(self):
         # Build an isolated workspace with fixture data in its writable-overlay
         # ancestry. No live sandbox, bridge, firewall, or host mount is used.

@@ -178,9 +178,9 @@ opencode auth login
 gh auth login
 ```
 
-The runtime is less trusted than your own machine. Local Codex/Claude/OpenCode
-credentials and OAuth tokens are **not** copied to Colab. Interactive login is
-the supported path. This is deliberate: copying local tokens would give a
+The runtime is less trusted than your own machine. Local Codex, Claude Code,
+Antigravity, and OpenCode credentials and OAuth tokens are **not** copied to
+Colab. Interactive login is the supported path. This is deliberate: copying local tokens would give a
 hosted VM long-lived credentials with no additional isolation.
 
 For GitHub HTTPS workflows, either run `gh auth login` inside the runtime or
@@ -405,7 +405,7 @@ archive nor the npm/Node trees became the default.
 | Agent OAuth/login sessions | Preserved | Destroyed |
 | GitHub PAT sent with `set-gh-token.sh` | Preserved | Destroyed |
 | `.colab/` SSH key, config, Git identity | Local only | Preserved |
-| Codex/Claude/OpenCode auth from the host | Never copied | Never copied |
+| Agent credentials from the host | Never copied | Never copied |
 | Docker images/volumes | Not available | Not applicable |
 
 The local `.colab/` directory contains a dedicated Ed25519 key, the session
@@ -423,19 +423,20 @@ archives and from agent credentials.
 | Antigravity CLI (`agy`) | Yes | Yes, official installer (best effort) |
 | OpenCode | Yes | Yes, installed by bootstrap |
 | Git + GitHub CLI | Yes | Yes, interactive `gh` login or PAT |
-| Secret scanning (`gitleaks`) | No | Yes, pinned release with checksum verification |
+| Secret scanning (`gitleaks`) | GitHub Actions history scan; not installed in the workspace image | Installed in the runtime with checksum verification; GitHub Actions also scans repository history |
 | Neovim + shared config | Yes | Yes, current Neovim from upstream |
 | Zsh + Oh My Zsh + Starship | Yes | Yes |
 | tmux | Yes | Yes |
 | Python, Node.js, C/C++, CMake | Yes | Yes, Node.js 22 LTS from nodejs.org |
 | `/home/agent/workspace` | Yes | Yes, compatibility path |
-| Persistent credentials across recreation | Yes | No, by design |
+| Agent credentials across recreation | Codex and Claude persist; Antigravity and OpenCode do not | No agent credentials persist |
+| Token Monitor | Optional host integration for four providers | No lifecycle integration |
 | Docker-in-Docker | Yes, isolated sidecar | No, unsupported |
 | Tailscale service identity | Host-exposed port | No, Colab WebSocket SSH |
 | Inbound ports / privileged containers | Controlled | Not available |
 | VM-grade isolation | No (shared kernel) | Yes, managed Google VM |
 | Unprivileged `agent` user | Yes (UID 10001) | No, Colab login is root |
-| systemd | No | No |
+| systemd in workspace | No; the Docker host can run the optional Token Monitor timer | No |
 
 ### Docker-in-Docker
 

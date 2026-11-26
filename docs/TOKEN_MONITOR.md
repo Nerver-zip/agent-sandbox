@@ -123,7 +123,7 @@ A separate comparison used the same 304 sessions and 44 project labels in two is
 
 Project accounting added 44,114 bytes per upload in this fixture. Each collector staged the same 143,574 source bytes. The short timing sample did not resolve a runtime penalty.
 
-The isolated lifecycle tests capture a final Antigravity SQLite write, preserve a projected snapshot through a Hub outage and workspace removal, and retain totals after an empty workspace recreation. They do not exercise the production sandbox or prove owner sign-off.
+The isolated lifecycle tests capture a final Antigravity SQLite write, preserve a projected snapshot through a Hub outage and workspace removal, and retain totals after an empty workspace recreation. They do not exercise the production sandbox or prove owner sign-off. An isolated setup-upgrade test starts with an explicit three-provider list and a running fixture workspace, then adds Antigravity and reruns setup. It checks the workspace PID and start time, device ID, secret, existing archived totals and projects, and managed unit file contents and inodes. Systemd calls are mocked and the fixture process is not a real coding agent.
 
 The integration tests start a disposable Hub and Docker containers. To run them, install the upstream checkout's production npm dependencies, build the collector image for the same version, and set `TOKEN_MONITOR_TEST_UPSTREAM` and `TOKEN_MONITOR_TEST_IMAGE` to their respective checkout path and image tag. Run `python3 -m unittest discover -s tests -p 'test_token_monitor*.py' -v` from Agent Sandbox.
 

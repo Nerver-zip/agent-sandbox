@@ -653,6 +653,100 @@ class OfficialCollectorTest(unittest.TestCase):
         self.monitor.deliver(self.monitor.pending()[0])
         self.assertEqual(self.totals()[0], {"claude": 110, "codex": 220, "opencode": 132})
 
+    def test_setup_upgrade_preserves_running_workspace_and_three_provider_history(self):
+        def number(field, value):
+            return antigravity_projection.enc(field << 3) + antigravity_projection.enc(value)
+
+        def blob(field, value):
+            return (antigravity_projection.enc((field << 3) | 2) +
+                    antigravity_projection.enc(len(value)) + value)
+
+        project = self.path / "upgrade-project"
+        project.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", project / "scripts/token-monitor")
+        units = self.path / "systemd"
+        units.mkdir()
+        secret_file = project / ".token-monitor.secret"
+        secret_file.write_text(self.secret + "\n")
+        secret_file.chmod(0o600)
+        config_file = project / ".token-monitor.json"
+        config = {"enabled": True, "hub_url": f"http://127.0.0.1:{self.port}",
+                  "secret_file": ".token-monitor.secret", "providers": ["claude", "codex", "opencode"],
+                  "projects_enabled": True, "timezone": "UTC"}
+        config_file.write_text(json.dumps(config))
+        config_file.chmod(0o600)
+        agy_dir = self.home / ".gemini/antigravity-cli/conversations"
+        agy_dir.mkdir(parents=True)
+        stamp = int((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).timestamp())
+        usage = number(2, 100) + number(10, 10) + blob(11, b"upgrade-response")
+        row = blob(1, blob(4, usage) + blob(19, b"gemini-3-flash-a"))
+        meta = blob(1, blob(1, b"file:///home/agent/workspace/Agy-Project")) + blob(2, number(1, stamp))
+        with closing(sqlite3.connect(agy_dir / "upgrade.db")) as db, db:
+            db.executescript("CREATE TABLE gen_metadata(idx INTEGER,data BLOB); CREATE TABLE trajectory_metadata_blob(data BLOB);")
+            db.execute("INSERT INTO gen_metadata VALUES (0,?)", (row,))
+            db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (meta,))
+        fixture = self.path / "upgrade-fixture"
+        shutil.copytree(self.home, fixture / "home/agent")
+        (fixture / "Dockerfile").write_text(
+            f"FROM {IMAGE}\nCOPY --chown={os.getuid()}:{os.getgid()} home/agent/ /home/agent/\n")
+        image = f"{self.monitor.container_name}-upgrade-workspace"
+        self.addCleanup(subprocess.run, ["docker", "image", "rm", image],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "build", "--quiet", "-t", image, str(fixture)],
+                       check=True, stdout=subprocess.DEVNULL, timeout=60)
+        cid = subprocess.check_output([
+            "docker", "run", "-d", "--network=none", "--cap-drop=ALL", "--init",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--label", "com.docker.compose.project=agent-sandbox",
+            "--label", "com.docker.compose.service=workspace",
+            "--label", f"com.docker.compose.project.working_dir={project}",
+            "--entrypoint", "sh", image, "-c",
+            "printf active > /home/agent/agent-marker; exec sleep infinity",
+        ], text=True, timeout=15).strip()
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", cid],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "exec", cid, "sh", "-c", "while test ! -f /home/agent/agent-marker; do sleep 0.1; done"],
+                       check=True, timeout=10)
+        def state_of_workspace():
+            return subprocess.check_output(["docker", "inspect", "--format",
+                                            "{{.State.Pid}}|{{.State.StartedAt}}|{{.State.Running}}", cid],
+                                           text=True, timeout=10).strip()
+        before_workspace = state_of_workspace()
+        original_init = manager.Monitor.__init__
+        def test_init(monitor, settings):
+            original_init(monitor, settings)
+            monitor.image = IMAGE
+            monitor.container_name = self.monitor.container_name
+        saved_umask = os.umask(0o077)
+        self.addCleanup(os.umask, saved_umask)
+        with patch.multiple(manager, PROJECT=project, CONFIG=config_file, SYSTEMD=units), \
+             patch.object(manager.os, "geteuid", return_value=0), \
+             patch.object(manager, "private_state"), patch.object(manager, "systemctl") as systemctl, \
+             patch.object(manager.Monitor, "__init__", test_init), patch.object(sys, "argv", ["manager", "setup"]):
+            self.assertEqual(manager.main(), 0)
+            before_totals = self.totals()
+            before_projects = self.projects()
+            self.assertEqual(before_totals[0], {"claude": 110, "codex": 220, "opencode": 132})
+            before_device = (self.state / "device.json").read_bytes()
+            before_secret = secret_file.read_bytes()
+            before_units = {path.name: (path.read_bytes(), path.stat().st_ino) for path in units.iterdir()}
+            self.assertEqual(len(before_units), 2)
+            # Previously captured history must survive when its source is gone.
+            subprocess.run(["docker", "exec", cid, "rm", "-rf", "/home/agent/.claude/projects"], check=True, timeout=10)
+            config["providers"].append("antigravity")
+            config_file.write_text(json.dumps(config))
+            self.assertEqual(manager.main(), 0)
+            self.assertEqual(state_of_workspace(), before_workspace)
+            self.assertEqual(subprocess.check_output(["docker", "exec", cid, "cat", "/home/agent/agent-marker"], text=True), "active")
+            self.assertEqual((self.state / "device.json").read_bytes(), before_device)
+            self.assertEqual(secret_file.read_bytes(), before_secret)
+            self.assertEqual({path.name: (path.read_bytes(), path.stat().st_ino) for path in units.iterdir()}, before_units)
+            self.assertEqual(json.loads(config_file.read_text()), config)
+            self.assertEqual(self.totals()[0], {**before_totals[0], "antigravity": 110})
+            self.assertEqual({key: self.projects()[key] for key in before_projects}, before_projects)
+            self.assertEqual(self.projects()["agy-project"]["clients"], {"antigravity": 110})
+            self.assertTrue(systemctl.called)
+
     def test_antigravity_final_capture_and_empty_recreation(self):
         self.check_antigravity_final_capture(outage=False)
 

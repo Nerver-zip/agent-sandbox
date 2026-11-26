@@ -211,7 +211,17 @@ class OfficialCollectorTest(unittest.TestCase):
         self.monitor.deliver(self.monitor.pending()[0])
         counts, costs = self.totals()
         self.assertEqual(counts, {**original[0], "antigravity": 33680})
-        self.assertGreater(costs["antigravity"], 0)
+        # Calculate independently from the actual image's pinned pricing
+        # catalog; the source records have non-cached input, cache read,
+        # response output and reasoning output as separate components.
+        catalog = json.loads(subprocess.check_output([
+            "docker", "run", "--rm", "--network=none", "--entrypoint", "cat", IMAGE,
+            "/opt/tokscale-pricing/cache/pricing-models-dev.json",
+        ], timeout=20))["data"]["google/gemini-3.5-flash"]
+        expected_cost = (1000 * catalog["input_cost_per_token"] +
+                         32000 * catalog["cache_read_input_token_cost"] +
+                         680 * catalog["output_cost_per_token"])
+        self.assertAlmostEqual(costs["antigravity"], expected_cost, places=8)
         period = self.device_record()["periods"]["allTime"]
         self.assertEqual(period["clientModels"]["antigravity"], {"gemini-3.5-flash-high": 33680})
         self.assertEqual(period["clientCacheReads"]["antigravity"], 32000)

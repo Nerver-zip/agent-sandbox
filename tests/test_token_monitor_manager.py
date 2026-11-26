@@ -106,6 +106,30 @@ class ConfigurationTest(unittest.TestCase):
         with self.assertRaises(manager.ConfigurationError):
             manager.Monitor(manager.configuration())
 
+    def test_sanitizer_cleanup_distinguishes_absent_from_live_worker(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        with patch.object(manager, "docker", side_effect=[manager.JobError("missing"), ""]):
+            monitor.remove_sanitizer("fixture-sanitizer")
+        with patch.object(manager, "docker", side_effect=[manager.JobError("failed"), "fixture-sanitizer\n"]):
+            with self.assertRaises(manager.JobError):
+                monitor.remove_sanitizer("fixture-sanitizer")
+        with patch.object(manager, "docker", side_effect=[manager.JobError("failed"), manager.JobError("daemon")]):
+            with self.assertRaises(manager.JobError):
+                monitor.remove_sanitizer("fixture-sanitizer")
+
+    def test_sanitizer_rejects_hosts_without_swap_limit(self):
+        self.write()
+        self.state.mkdir()
+        shutil.copytree(ROOT / "scripts/token-monitor", self.project / "scripts/token-monitor")
+        monitor = manager.Monitor(manager.configuration())
+        with patch.object(manager, "docker", return_value="false"), \
+             self.assertRaisesRegex(manager.SnapshotError, "swap-limit support"):
+            monitor.sanitize_antigravity([], self.project / "output")
+        self.assertFalse((self.project / "output").exists())
+
     def test_sanitizer_timeout_removes_worker_and_kills_client(self):
         self.write()
         self.state.mkdir()
@@ -118,8 +142,9 @@ class ConfigurationTest(unittest.TestCase):
         process = Mock()
         process.stdin = io.BytesIO()
         process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 1), 0]
-        with patch.object(manager.subprocess, "Popen", return_value=process), \
+        with patch.object(manager, "docker", return_value="true"), patch.object(manager.subprocess, "Popen", return_value=process), \
              patch.object(manager.subprocess, "run") as run:
+            run.return_value.returncode = 0
             with self.assertRaisesRegex(manager.SnapshotError, "timed out"):
                 monitor.sanitize_antigravity([("session.db", fd, [0, 0, 7, 0, 0]),
                                             ("session.db-wal", None, None),

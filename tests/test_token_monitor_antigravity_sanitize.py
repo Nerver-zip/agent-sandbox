@@ -44,6 +44,7 @@ class SanitizeTest(unittest.TestCase):
                 result = subprocess.run(["python3", "-I", str(WORKER), str(root / "work")], input=raw,
                                         capture_output=True, timeout=15, check=True)
                 self.assertNotIn(secret, result.stdout)
+                self.assertEqual(list((root / "work").iterdir()), [])
                 output = root / "result.db"
                 output.write_bytes(result.stdout)
                 with closing(sqlite3.connect(output)) as reader:

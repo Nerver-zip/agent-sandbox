@@ -204,6 +204,25 @@ class OfficialCollectorTest(unittest.TestCase):
         self.assertEqual(original["entries"][0]["reasoning"], 40)
         self.assertGreater(original["totalCost"], 0)
 
+    def test_malformed_antigravity_aborts_snapshot_and_removes_worker(self):
+        directory = self.home / ".gemini/antigravity-cli/conversations"
+        directory.mkdir(parents=True)
+        secret = b"fixture-sensitive-input"
+        with closing(sqlite3.connect(directory / "bad.db")) as db, db:
+            db.execute("CREATE TABLE gen_metadata(idx INTEGER,data BLOB)")
+            db.execute("INSERT INTO gen_metadata VALUES (0,?)", (b"\x0a\xff" + secret,))
+        self.monitor.config["providers"].append("antigravity")
+        with self.assertRaisesRegex(manager.SnapshotError, "sanitizer failed"):
+            self.publish()
+        self.assertEqual(self.monitor.pending(), [])
+        self.assertIsNone(self.monitor._sanitizer_name)
+        status = subprocess.run(["docker", "container", "inspect", self.monitor.container_name + "-sanitize"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        self.assertNotEqual(status.returncode, 0)
+        for path in self.state.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn(secret, path.read_bytes())
+
     def test_antigravity_upgrade_retention_and_restore(self):
         self.check_antigravity_retention(remove_one=False)
 
@@ -259,6 +278,10 @@ class OfficialCollectorTest(unittest.TestCase):
             writer.commit()
         self.monitor.config["providers"].append("antigravity")
         self.publish()
+        self.assertIsNone(self.monitor._sanitizer_name)
+        removed = subprocess.run(["docker", "container", "inspect", self.monitor.container_name + "-sanitize"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        self.assertNotEqual(removed.returncode, 0)
         for path in self.monitor.pending()[0].rglob("*"):
             if path.is_file():
                 self.assertNotIn(fake_secret, path.read_bytes())

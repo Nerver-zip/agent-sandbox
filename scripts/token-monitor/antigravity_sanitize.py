@@ -10,6 +10,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import tempfile
 import tarfile
 from pathlib import Path
 
@@ -22,8 +23,13 @@ MAX_INPUT = 2 * 1024**3
 
 def main():
     os.umask(0o077)
-    work = Path(sys.argv[1]) if len(sys.argv) == 2 else Path("/work")
-    work.mkdir(parents=True, exist_ok=True)
+    base = Path(sys.argv[1]) if len(sys.argv) == 2 else Path("/work")
+    base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="sanitize-", dir=base) as directory:
+        sanitize(Path(directory))
+
+
+def sanitize(work):
     names = {"usage.db", "usage.db-wal", "usage.db-journal"}
     seen = set()
     total = 0

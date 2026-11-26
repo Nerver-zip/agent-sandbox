@@ -283,6 +283,7 @@ class Monitor:
         self.image = f"agent-sandbox-token-monitor:{config['version']}-{source_hash.hexdigest()[:12]}"
         instance = hashlib.sha256(os.fsencode(PROJECT)).hexdigest()[:16]
         self.container_name = f"agent-sandbox-token-monitor-{instance}"
+        self._sanitizer_name = None
 
     def require_session_archive(self):
         archive = self.collector_state / "archive"
@@ -333,17 +334,36 @@ class Monitor:
     def pending(self):
         return sorted(p for p in self.snapshots.iterdir() if GENERATION.fullmatch(p.name))
 
+    def remove_sanitizer(self, name):
+        """Remove our worker, accepting an already-removed container only."""
+        try:
+            docker(["rm", "-f", name], timeout=10)
+        except JobError:
+            present = docker(["ps", "-a", "--filter", f"name=^/{name}$", "--format", "{{.Names}}"], timeout=10)
+            if name in present.splitlines():
+                raise
+
     def sanitize_antigravity(self, companions, target):
         """Stream a stable DB and sidecars to an isolated tmpfs-only worker."""
-        name = f"{self.container_name}-sanitize-{uuid.uuid4().hex[:12]}"
-        args = DOCKER + [
-            "run", "--rm", "--init", "-i", "--name", name, "--pull=never",
-            "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-            "--pids-limit=32", "--memory=2g", "--cpus=1.0", "--user", f"{UID}:{UID}",
-            "--log-driver=none", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
-            "--tmpfs", f"/work:rw,nosuid,nodev,noexec,size=1024m,uid={UID},gid={UID},mode=0700",
-            "--entrypoint", "/usr/bin/python3", self.image, "-I", "/opt/antigravity_sanitize.py",
-        ]
+        if self._sanitizer_name is None:
+            if docker(["info", "--format", "{{json .SwapLimit}}"], timeout=10).strip() != "true":
+                raise SnapshotError("Antigravity sanitization requires Docker swap-limit support")
+            name = f"{self.container_name}-sanitize"
+            # The host lock serializes this installation. Remove a tmpfs-only
+            # worker left by an interrupted capture before starting a new one.
+            self.remove_sanitizer(name)
+            docker([
+                "run", "-d", "--rm", "--init", "--name", name, "--pull=never",
+                "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                "--pids-limit=32", "--memory=2g", "--memory-swap=2g", "--cpus=1.0", "--user", f"{UID}:{UID}",
+                "--log-driver=none", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
+                "--tmpfs", f"/work:rw,nosuid,nodev,noexec,size=1024m,uid={UID},gid={UID},mode=0700",
+                "--entrypoint", "/bin/sleep", self.image, "240",
+            ], timeout=RUN_TIMEOUT)
+            self._sanitizer_name = name
+        name = self._sanitizer_name
+        args = DOCKER + ["exec", "-i", "--user", f"{UID}:{UID}", name,
+                         "/usr/bin/python3", "-I", "/opt/antigravity_sanitize.py"]
         errors = []
         with target.open("xb") as output:
             process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
@@ -375,8 +395,10 @@ class Monitor:
                 status = process.wait(timeout=RUN_TIMEOUT)
             except subprocess.TimeoutExpired:
                 try:
-                    subprocess.run(DOCKER + ["rm", "-f", name], stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, timeout=10, check=False)
+                    removed = subprocess.run(DOCKER + ["rm", "-f", name], stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL, timeout=10, check=False)
+                    if removed.returncode == 0:
+                        self._sanitizer_name = None
                 except (OSError, subprocess.TimeoutExpired):
                     pass
                 finally:
@@ -422,6 +444,12 @@ class Monitor:
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+            if self._sanitizer_name is not None:
+                name, self._sanitizer_name = self._sanitizer_name, None
+                try:
+                    self.remove_sanitizer(name)
+                except (JobError, subprocess.TimeoutExpired):
+                    raise SnapshotError("Antigravity sanitizer cleanup failed") from None
 
     def deliver(self, generation):
         # Draft versions staged raw Antigravity databases. Never deliver a
